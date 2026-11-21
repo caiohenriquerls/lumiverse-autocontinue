@@ -222,6 +222,11 @@ var EN = {
 my gateway`,
   policyTitle: "What it never retries",
   policyBody: "Payment, credit, quota and plan limits; invalid or missing API keys and every other credential failure; moderation and content policy; context length, unknown models and malformed requests; a generation you stopped yourself. An error it does not recognise is left alone too.",
+  logTitle: "Recent decisions",
+  logHelp: "Newest first. Every failure it could have continued leaves a line here, including the ones it chose not to continue.",
+  logEmpty: "Nothing recorded yet — no generation has failed since this page loaded.",
+  declined: (reason) => `Did not continue: ${reason}.`,
+  skipped: (guard) => `Did not continue, guard: ${guard}.`,
   waiting: (seconds) => `Connection lost. Continuing in ${seconds}s...`,
   continuing: (attempt, max) => `Continuing the reply (attempt ${attempt} of ${max}).`,
   exhausted: (max) => `Stopped after ${max} automatic continues. Over to you.`,
@@ -247,6 +252,11 @@ var PT = {
 meu gateway`,
   policyTitle: "O que ele nunca repete",
   policyBody: "Pagamento, crédito, cota e limite de plano; chave de API inválida ou ausente e qualquer outra falha de credencial; moderação e política de conteúdo; tamanho de contexto, modelo desconhecido e requisição malformada; geração que você mesmo parou. Erro que ele não reconhece também fica quieto.",
+  logTitle: "Decisões recentes",
+  logHelp: "Mais recente primeiro. Toda falha que ele poderia ter continuado deixa uma linha aqui, inclusive as que ele escolheu não continuar.",
+  logEmpty: "Nada registrado ainda — nenhuma geração falhou desde que esta página carregou.",
+  declined: (reason) => `Não continuei: ${reason}.`,
+  skipped: (guard) => `Não continuei, trava: ${guard}.`,
   waiting: (seconds) => `Conexão caiu. Continuando em ${seconds}s...`,
   continuing: (attempt, max) => `Continuando a resposta (tentativa ${attempt} de ${max}).`,
   exhausted: (max) => `Parei depois de ${max} continues automáticos. A bola está com você.`,
@@ -263,13 +273,16 @@ function pickStrings() {
 
 // src/frontend.ts
 var SETTINGS_KEY = "config";
+var DECISIONS_KEY = "decisions";
 var CONTINUE_COMMAND = "action-continue";
 var CLAIM_PREFIX = "spindle:lumi_autocontinue:claim:";
 var CLAIM_TTL_MS = 15000;
 var SLOW_FLOOR_MS = 20000;
 var MAX_DELAY_MS = 120000;
 var ATTEMPT_RESET_MS = 10 * 60000;
+var RUNNING_TTL_MS = 15 * 60000;
 var NOTICE_TTL_MS = 7000;
+var MAX_DECISIONS = 20;
 var DEFAULTS = {
   enabled: true,
   maxAttempts: 2,
@@ -301,6 +314,7 @@ function normalizeConfig(raw) {
 function parseBlockWords(text) {
   return text.split(/[\n,;]+/).map((word) => word.trim()).filter((word) => word.length >= 3);
 }
+var DOCUMENT_TOKEN = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
 function claimChat(chatId) {
   const key = `${CLAIM_PREFIX}${chatId}`;
   try {
@@ -308,15 +322,15 @@ function claimChat(chatId) {
     const existing = window.localStorage.getItem(key);
     if (existing) {
       const parsed = JSON.parse(existing);
-      if (typeof parsed?.at === "number" && now - parsed.at < CLAIM_TTL_MS)
+      const fresh = typeof parsed?.at === "number" && now - parsed.at < CLAIM_TTL_MS;
+      if (fresh && parsed?.token !== DOCUMENT_TOKEN)
         return false;
     }
-    const token = `${now}-${Math.random().toString(36).slice(2)}`;
-    window.localStorage.setItem(key, JSON.stringify({ at: now, token }));
+    window.localStorage.setItem(key, JSON.stringify({ at: now, token: DOCUMENT_TOKEN }));
     const readBack = window.localStorage.getItem(key);
     if (!readBack)
       return true;
-    return JSON.parse(readBack)?.token === token;
+    return JSON.parse(readBack)?.token === DOCUMENT_TOKEN;
   } catch {
     return true;
   }
@@ -354,22 +368,32 @@ function setup(ctx) {
     .lac-help { margin: 0; font-size: 12px; line-height: 1.45; color: var(--lumiverse-text-muted, inherit); }
     .lac-control { flex: 0 0 auto; min-width: 96px; display: flex; justify-content: flex-end; }
     .lac-block { display: flex; flex-direction: column; gap: 6px; }
-    .lac-policy {
+    .lac-policy, .lac-logbox {
       padding: 12px 14px;
       border: 1px solid var(--lumiverse-border, rgba(127,127,127,.4));
       border-radius: var(--lumiverse-radius, 8px);
       background: var(--lumiverse-fill-subtle, transparent);
     }
     .lac-policy-title { font-size: 13px; font-weight: 600; margin-bottom: 4px; }
+    .lac-log { margin: 8px 0 0; padding-left: 18px; font-size: 12px; line-height: 1.6; }
+    .lac-log li { color: var(--lumiverse-text-muted, inherit); }
   `);
   disposers.push(removeStyle);
   const noticeWrapper = ctx.dom.inject("body", '<div class="lac-notice" role="status" aria-live="polite" aria-atomic="true"></div>');
   const notice = noticeWrapper.querySelector(".lac-notice") ?? noticeWrapper;
   let noticeTimer = null;
-  function announce(text) {
+  let decisions = [];
+  let renderLog = null;
+  function record(chatId, text) {
+    decisions = [{ at: Date.now(), chatId, text }, ...decisions].slice(0, MAX_DECISIONS);
+    renderLog?.();
+    ctx.settings?.set(DECISIONS_KEY, decisions).catch(() => {});
+  }
+  function announce(chatId, text) {
     if (destroyed)
       return;
     console.info(`[lumi_autocontinue] ${text}`);
+    record(chatId, text);
     if (!config.announce)
       return;
     notice.textContent = text;
@@ -382,6 +406,10 @@ function setup(ctx) {
       notice.textContent = "";
     }, NOTICE_TTL_MS);
   }
+  function skip(chatId, text) {
+    console.info(`[lumi_autocontinue] ${text}`);
+    record(chatId, text);
+  }
   disposers.push(() => {
     if (noticeTimer !== null)
       window.clearTimeout(noticeTimer);
@@ -392,6 +420,13 @@ function setup(ctx) {
     settings.get(SETTINGS_KEY).then((stored) => {
       if (!destroyed && stored !== undefined)
         config = normalizeConfig(stored);
+    }).catch(() => {});
+    settings.get(DECISIONS_KEY).then((stored) => {
+      if (destroyed || !Array.isArray(stored))
+        return;
+      const restored = stored.filter((entry) => !!entry && typeof entry.at === "number" && typeof entry.text === "string");
+      decisions = [...decisions, ...restored].slice(0, MAX_DECISIONS);
+      renderLog?.();
     }).catch(() => {});
     const unwatch = settings.watch(SETTINGS_KEY, (stored) => {
       config = normalizeConfig(stored);
@@ -410,37 +445,30 @@ function setup(ctx) {
     pending = null;
   }
   function isRunning(chatId) {
-    const set = running.get(chatId);
-    return !!set && set.size > 0;
+    const entries = running.get(chatId);
+    if (!entries)
+      return false;
+    const now = Date.now();
+    for (const [id, startedAt] of entries) {
+      if (now - startedAt > RUNNING_TTL_MS)
+        entries.delete(id);
+    }
+    if (entries.size === 0)
+      running.delete(chatId);
+    return entries.size > 0;
   }
   function markStarted(chatId, generationId) {
-    const set = running.get(chatId) ?? new Set;
-    set.add(generationId ?? "unknown");
-    running.set(chatId, set);
+    const entries = running.get(chatId) ?? new Map;
+    entries.set(generationId ?? "unknown", Date.now());
+    running.set(chatId, entries);
   }
-  function markFinished(chatId, generationId) {
-    const set = running.get(chatId);
-    if (!set)
-      return;
-    set.delete(generationId ?? "unknown");
-    if (set.size === 0)
-      running.delete(chatId);
-  }
-  function ownsGeneration(payload) {
-    const owner = str(payload.frontendSessionId);
-    const mine = typeof ctx.frontendSessionId === "string" ? ctx.frontendSessionId : undefined;
-    if (owner && mine)
-      return owner === mine;
-    try {
-      return document.visibilityState === "visible";
-    } catch {
-      return true;
-    }
+  function markFinished(chatId) {
+    running.delete(chatId);
   }
   function scheduleContinue(chatId, messageId, delayMs) {
     cancelPending();
     const seconds = Math.max(1, Math.round(delayMs / 1000));
-    announce(strings.waiting(seconds));
+    announce(chatId, strings.waiting(seconds));
     const timer = window.setTimeout(() => {
       pending = null;
       fireContinue(chatId, messageId);
@@ -448,44 +476,41 @@ function setup(ctx) {
     pending = { chatId, timer };
   }
   async function fireContinue(chatId, messageId) {
-    if (destroyed || !config.enabled)
+    if (destroyed)
       return;
+    if (!config.enabled)
+      return skip(chatId, strings.skipped("disabled"));
     if (ctx.getActiveChat().chatId !== chatId)
-      return;
+      return skip(chatId, strings.skipped("other-chat"));
     if (isRunning(chatId))
-      return;
+      return skip(chatId, strings.skipped("already-generating"));
     const surfaces = ctx.host.surfaces;
     if (!surfaces)
-      return;
+      return skip(chatId, strings.skipped("no-host-commands"));
     const available = surfaces.list(["command"]).some((surface) => surface.id === CONTINUE_COMMAND && surface.invocable !== false);
-    if (!available) {
-      console.warn("[lumi_autocontinue] the host does not expose action-continue to this extension");
-      return;
-    }
+    if (!available)
+      return skip(chatId, strings.skipped("continue-command-unavailable"));
     if (!claimChat(chatId))
-      return;
-    const record = attempts.get(chatId) ?? { count: 0, messageId, at: Date.now() };
-    record.count += 1;
-    record.messageId = messageId;
-    record.at = Date.now();
-    attempts.set(chatId, record);
-    announce(strings.continuing(record.count, config.maxAttempts));
+      return skip(chatId, strings.skipped("another-window-claimed-it"));
+    const record_ = attempts.get(chatId) ?? { count: 0, messageId, at: Date.now() };
+    record_.count += 1;
+    record_.messageId = messageId;
+    record_.at = Date.now();
+    attempts.set(chatId, record_);
+    announce(chatId, strings.continuing(record_.count, config.maxAttempts));
     try {
       await surfaces.invoke({ kind: "command", id: CONTINUE_COMMAND });
     } catch (error) {
       console.warn("[lumi_autocontinue] continue failed to start", error);
-      announce(strings.failed);
+      announce(chatId, strings.failed);
     }
   }
   function onGenerationEnded(raw) {
     const payload = raw ?? {};
     const chatId = str(payload.chatId);
-    const generationId = str(payload.generationId);
     if (!chatId)
       return;
-    markFinished(chatId, generationId);
-    if (!config.enabled)
-      return;
+    markFinished(chatId);
     const error = str(payload.error) ?? str(payload.errorMessage);
     const truncated = !error && str(payload.finish_reason) === "length";
     if (!error && !truncated) {
@@ -493,36 +518,33 @@ function setup(ctx) {
       cancelPending(chatId);
       return;
     }
+    if (!config.enabled)
+      return skip(chatId, strings.skipped("disabled"));
     if (truncated && !config.continueOnTruncated)
-      return;
+      return skip(chatId, strings.skipped("truncated-off"));
     const generationType = str(payload.generationType) ?? "normal";
-    if (generationType !== "normal" && generationType !== "continue")
-      return;
+    if (generationType !== "normal" && generationType !== "continue") {
+      return skip(chatId, strings.skipped(`generation-type:${generationType}`));
+    }
     const content = str(payload.content);
     if (!content || !content.trim())
-      return;
-    if (!ownsGeneration(payload))
-      return;
+      return skip(chatId, strings.skipped("no-partial-text"));
     if (ctx.getActiveChat().chatId !== chatId)
-      return;
+      return skip(chatId, strings.skipped("other-chat"));
     if (isRunning(chatId))
-      return;
+      return skip(chatId, strings.skipped("already-generating"));
     const verdict = error ? classifyGenerationFailure({ errorCode: str(payload.errorCode), error: str(payload.error), errorMessage: str(payload.errorMessage) }, parseBlockWords(config.blockWords)) : { retry: true, slow: false, reason: "truncated" };
-    if (!verdict.retry) {
-      console.info(`[lumi_autocontinue] leaving this one alone (${verdict.reason})`);
-      return;
-    }
+    if (!verdict.retry)
+      return skip(chatId, strings.declined(verdict.reason));
     const messageId = str(payload.messageId);
-    let record = attempts.get(chatId);
-    if (record && (record.messageId !== messageId || Date.now() - record.at > ATTEMPT_RESET_MS)) {
-      record = undefined;
+    let spentRecord = attempts.get(chatId);
+    if (spentRecord && (spentRecord.messageId !== messageId || Date.now() - spentRecord.at > ATTEMPT_RESET_MS)) {
+      spentRecord = undefined;
       attempts.delete(chatId);
     }
-    const spent = record?.count ?? 0;
-    if (spent >= config.maxAttempts) {
-      announce(strings.exhausted(config.maxAttempts));
-      return;
-    }
+    const spent = spentRecord?.count ?? 0;
+    if (spent >= config.maxAttempts)
+      return announce(chatId, strings.exhausted(config.maxAttempts));
     const base = config.delaySeconds * 1000 * 2 ** spent;
     const delayMs = Math.min(MAX_DELAY_MS, verdict.slow ? Math.max(base, SLOW_FLOOR_MS) : base);
     console.info(`[lumi_autocontinue] ${verdict.reason}: continuing in ${delayMs}ms`);
@@ -541,7 +563,7 @@ function setup(ctx) {
     const chatId = str(payload.chatId);
     if (!chatId)
       return;
-    markFinished(chatId, str(payload.generationId));
+    markFinished(chatId);
     cancelPending(chatId);
     attempts.delete(chatId);
   }));
@@ -559,14 +581,21 @@ function setup(ctx) {
       position: "bottom"
     });
     disposers.push(() => tab.destroy());
-    buildSettingsPanel(ctx, tab.root, strings, () => config, (patch) => {
+    const panel = buildSettingsPanel(ctx, tab.root, strings, () => config, (patch) => {
       config = normalizeConfig({ ...config, ...patch });
       settings.set(SETTINGS_KEY, config).catch(() => {});
+    }, () => decisions);
+    renderLog = panel.renderLog;
+    renderLog();
+    disposers.push(tab.onActivate(() => renderLog?.()));
+    disposers.push(() => {
+      renderLog = null;
     });
   }
   if (!ctx.host.surfaces) {
     console.warn("[lumi_autocontinue] this host exposes no command surfaces; the extension cannot continue anything");
   }
+  console.info("[lumi_autocontinue] watching for dropped connections");
   return () => {
     destroyed = true;
     cancelPending();
@@ -578,7 +607,7 @@ function setup(ctx) {
     ctx.dom.cleanup();
   };
 }
-function buildSettingsPanel(ctx, root, strings, read, write) {
+function buildSettingsPanel(ctx, root, strings, read, write, readDecisions) {
   const panel = ctx.dom.createElement("div", { class: "lac-settings" });
   root.appendChild(panel);
   const row = (label, help) => {
@@ -647,6 +676,37 @@ function buildSettingsPanel(ctx, root, strings, read, write) {
     ariaLabel: strings.blockLabel,
     onChange: (value) => write({ blockWords: value })
   });
+  const logBox = ctx.dom.createElement("div", { class: "lac-logbox" });
+  const logTitle = ctx.dom.createElement("div", { class: "lac-policy-title" });
+  logTitle.textContent = strings.logTitle;
+  const logHelp = ctx.dom.createElement("p", { class: "lac-help" });
+  logHelp.textContent = strings.logHelp;
+  const logList = ctx.dom.createElement("ul", { class: "lac-log" });
+  logBox.appendChild(logTitle);
+  logBox.appendChild(logHelp);
+  logBox.appendChild(logList);
+  panel.appendChild(logBox);
+  const renderLog = () => {
+    const entries = readDecisions();
+    logList.textContent = "";
+    if (entries.length === 0) {
+      const empty = ctx.dom.createElement("li");
+      empty.textContent = strings.logEmpty;
+      logList.appendChild(empty);
+      return;
+    }
+    for (const entry of entries) {
+      const item = ctx.dom.createElement("li");
+      let stamp;
+      try {
+        stamp = new Date(entry.at).toLocaleTimeString();
+      } catch {
+        stamp = "";
+      }
+      item.textContent = stamp ? `${stamp} — ${entry.text}` : entry.text;
+      logList.appendChild(item);
+    }
+  };
   const policy = ctx.dom.createElement("div", { class: "lac-policy" });
   const policyTitle = ctx.dom.createElement("div", { class: "lac-policy-title" });
   policyTitle.textContent = strings.policyTitle;
@@ -655,6 +715,7 @@ function buildSettingsPanel(ctx, root, strings, read, write) {
   policy.appendChild(policyTitle);
   policy.appendChild(policyBody);
   panel.appendChild(policy);
+  return { renderLog };
 }
 export {
   setup

@@ -15,6 +15,11 @@
  * Everything runs in the browser. The continue itself goes through the host's
  * own command (`action-continue`, the same one the command palette runs), so
  * the reply is produced exactly as a manual continue would produce it.
+ *
+ * Every path that declines to continue records why, in the console and in a
+ * decision log the settings panel renders. A silent extension is impossible to
+ * debug, and "it just did nothing" was exactly the bug report that produced
+ * this version.
  */
 
 import type { SpindleFrontendContext } from 'lumiverse-spindle-types'
@@ -22,16 +27,24 @@ import { classifyGenerationFailure } from './error-policy'
 import { pickStrings, type Strings } from './strings'
 
 const SETTINGS_KEY = 'config'
+const DECISIONS_KEY = 'decisions'
 const CONTINUE_COMMAND = 'action-continue'
 const CLAIM_PREFIX = 'spindle:lumi_autocontinue:claim:'
-/** How long one tab's claim on a chat blocks the other tabs. */
+/** How long one document's claim on a chat blocks the other documents. */
 const CLAIM_TTL_MS = 15_000
 /** Rate-limit failures never retry sooner than this. */
 const SLOW_FLOOR_MS = 20_000
 const MAX_DELAY_MS = 120_000
 /** A new failure this long after the last one starts the attempt count over. */
 const ATTEMPT_RESET_MS = 10 * 60_000
+/**
+ * A generation whose start we saw this long ago is treated as finished even if
+ * no terminal event arrived. Without this, one lost GENERATION_ENDED would
+ * leave the chat permanently "busy" and quietly disable the extension there.
+ */
+const RUNNING_TTL_MS = 15 * 60_000
 const NOTICE_TTL_MS = 7_000
+const MAX_DECISIONS = 20
 
 type Config = {
   enabled: boolean
@@ -50,6 +63,8 @@ const DEFAULTS: Config = {
   announce: true,
   blockWords: '',
 }
+
+type Decision = { at: number; chatId: string; text: string }
 
 /** Shape of the host's GENERATION_ENDED payload, as far as this extension reads it. */
 type GenerationEndedLike = {
@@ -95,11 +110,23 @@ function parseBlockWords(text: string): string[] {
     .filter((word) => word.length >= 3)
 }
 
+/** Identifies this document to its own claims, for the lifetime of the page. */
+const DOCUMENT_TOKEN = `${Date.now()}-${Math.random().toString(36).slice(2)}`
+
 /**
- * Best-effort cross-tab lock. Two tabs open on the same chat both receive
- * GENERATION_ENDED, and two continues would produce two generations. Session
- * matching already settles the usual case; this covers the rest. Storage being
- * unavailable must never disable the feature, so a failure claims the slot.
+ * Best-effort cross-document lock, and the only thing standing between two
+ * open windows and two continues.
+ *
+ * The host does not tell an extension which document started a generation:
+ * `frontendSessionId` on the payload is whichever session the server currently
+ * treats as the execution owner, which with two windows open can be the one
+ * you are not looking at. Comparing it against this document's id was how
+ * 1.0.0 managed to skip a perfectly continuable failure in silence. So the
+ * claim decides, and storage being unavailable must never disable the feature.
+ *
+ * The claim is re-entrant for the document that holds it: our own second
+ * attempt on the same reply arrives well inside the TTL and must not be locked
+ * out by our own first one.
  */
 function claimChat(chatId: string): boolean {
   const key = `${CLAIM_PREFIX}${chatId}`
@@ -107,14 +134,14 @@ function claimChat(chatId: string): boolean {
     const now = Date.now()
     const existing = window.localStorage.getItem(key)
     if (existing) {
-      const parsed = JSON.parse(existing) as { at?: unknown }
-      if (typeof parsed?.at === 'number' && now - parsed.at < CLAIM_TTL_MS) return false
+      const parsed = JSON.parse(existing) as { at?: unknown; token?: unknown }
+      const fresh = typeof parsed?.at === 'number' && now - parsed.at < CLAIM_TTL_MS
+      if (fresh && parsed?.token !== DOCUMENT_TOKEN) return false
     }
-    const token = `${now}-${Math.random().toString(36).slice(2)}`
-    window.localStorage.setItem(key, JSON.stringify({ at: now, token }))
+    window.localStorage.setItem(key, JSON.stringify({ at: now, token: DOCUMENT_TOKEN }))
     const readBack = window.localStorage.getItem(key)
     if (!readBack) return true
-    return (JSON.parse(readBack) as { token?: unknown })?.token === token
+    return (JSON.parse(readBack) as { token?: unknown })?.token === DOCUMENT_TOKEN
   } catch {
     return true
   }
@@ -157,13 +184,15 @@ export function setup(ctx: SpindleFrontendContext) {
     .lac-help { margin: 0; font-size: 12px; line-height: 1.45; color: var(--lumiverse-text-muted, inherit); }
     .lac-control { flex: 0 0 auto; min-width: 96px; display: flex; justify-content: flex-end; }
     .lac-block { display: flex; flex-direction: column; gap: 6px; }
-    .lac-policy {
+    .lac-policy, .lac-logbox {
       padding: 12px 14px;
       border: 1px solid var(--lumiverse-border, rgba(127,127,127,.4));
       border-radius: var(--lumiverse-radius, 8px);
       background: var(--lumiverse-fill-subtle, transparent);
     }
     .lac-policy-title { font-size: 13px; font-weight: 600; margin-bottom: 4px; }
+    .lac-log { margin: 8px 0 0; padding-left: 18px; font-size: 12px; line-height: 1.6; }
+    .lac-log li { color: var(--lumiverse-text-muted, inherit); }
   `)
   disposers.push(removeStyle)
 
@@ -176,9 +205,23 @@ export function setup(ctx: SpindleFrontendContext) {
   const notice = noticeWrapper.querySelector('.lac-notice') ?? noticeWrapper
   let noticeTimer: number | null = null
 
-  function announce(text: string): void {
+  // ── Decision log ──────────────────────────────────────────────────────────
+  let decisions: Decision[] = []
+  let renderLog: (() => void) | null = null
+
+  function record(chatId: string, text: string): void {
+    decisions = [{ at: Date.now(), chatId, text }, ...decisions].slice(0, MAX_DECISIONS)
+    renderLog?.()
+    void ctx.settings?.set(DECISIONS_KEY, decisions).catch(() => {
+      /* the in-memory log still works without persistence */
+    })
+  }
+
+  /** Announce (screen reader + pill), log to the console, and keep the record. */
+  function announce(chatId: string, text: string): void {
     if (destroyed) return
     console.info(`[lumi_autocontinue] ${text}`)
+    record(chatId, text)
     if (!config.announce) return
     notice.textContent = text
     notice.setAttribute('data-visible', 'true')
@@ -188,6 +231,16 @@ export function setup(ctx: SpindleFrontendContext) {
       notice.setAttribute('data-visible', 'false')
       notice.textContent = ''
     }, NOTICE_TTL_MS)
+  }
+
+  /**
+   * A failure that could have been continued but was not. Recorded, never
+   * announced out loud: the chat already shows the error, and the point of
+   * these lines is that the next "why did nothing happen?" has an answer.
+   */
+  function skip(chatId: string, text: string): void {
+    console.info(`[lumi_autocontinue] ${text}`)
+    record(chatId, text)
   }
 
   disposers.push(() => {
@@ -206,6 +259,21 @@ export function setup(ctx: SpindleFrontendContext) {
       .catch(() => {
         /* keep defaults */
       })
+    void settings
+      .get<Decision[]>(DECISIONS_KEY)
+      .then((stored) => {
+        if (destroyed || !Array.isArray(stored)) return
+        const restored = stored.filter(
+          (entry): entry is Decision =>
+            !!entry && typeof entry.at === 'number' && typeof entry.text === 'string',
+        )
+        // Anything recorded in this session is newer than what was stored.
+        decisions = [...decisions, ...restored].slice(0, MAX_DECISIONS)
+        renderLog?.()
+      })
+      .catch(() => {
+        /* no history is not an error */
+      })
     const unwatch = settings.watch<Partial<Config>>(SETTINGS_KEY, (stored) => {
       config = normalizeConfig(stored)
     })
@@ -213,8 +281,8 @@ export function setup(ctx: SpindleFrontendContext) {
   }
 
   // ── Generation bookkeeping ────────────────────────────────────────────────
-  /** Generations the host has started and not yet finished, per chat. */
-  const running = new Map<string, Set<string>>()
+  /** Generations the host started and has not reported finished, per chat. */
+  const running = new Map<string, Map<string, number>>()
   /** Automatic continues already spent on the current reply of a chat. */
   const attempts = new Map<string, { count: number; messageId?: string; at: number }>()
   let pending: { chatId: string; timer: number } | null = null
@@ -227,44 +295,36 @@ export function setup(ctx: SpindleFrontendContext) {
   }
 
   function isRunning(chatId: string): boolean {
-    const set = running.get(chatId)
-    return !!set && set.size > 0
+    const entries = running.get(chatId)
+    if (!entries) return false
+    const now = Date.now()
+    for (const [id, startedAt] of entries) {
+      if (now - startedAt > RUNNING_TTL_MS) entries.delete(id)
+    }
+    if (entries.size === 0) running.delete(chatId)
+    return entries.size > 0
   }
 
   function markStarted(chatId: string, generationId?: string): void {
-    const set = running.get(chatId) ?? new Set<string>()
-    set.add(generationId ?? 'unknown')
-    running.set(chatId, set)
-  }
-
-  function markFinished(chatId: string, generationId?: string): void {
-    const set = running.get(chatId)
-    if (!set) return
-    set.delete(generationId ?? 'unknown')
-    if (set.size === 0) running.delete(chatId)
+    const entries = running.get(chatId) ?? new Map<string, number>()
+    entries.set(generationId ?? 'unknown', Date.now())
+    running.set(chatId, entries)
   }
 
   /**
-   * Only the tab that started the generation may continue it. The host stamps
-   * the originating document on the payload; when it is missing (older hosts,
-   * generations started outside a browser) fall back to the visible tab plus
-   * the cross-tab claim taken at fire time.
+   * Clear the whole chat, not just this generation id. Lumiverse runs one
+   * generation per chat at a time, and a terminal event for any of them means
+   * the chat is idle. Deleting only the matching id meant a single missed or
+   * renamed id could wedge the chat as busy forever.
    */
-  function ownsGeneration(payload: GenerationEndedLike): boolean {
-    const owner = str(payload.frontendSessionId)
-    const mine = typeof ctx.frontendSessionId === 'string' ? ctx.frontendSessionId : undefined
-    if (owner && mine) return owner === mine
-    try {
-      return document.visibilityState === 'visible'
-    } catch {
-      return true
-    }
+  function markFinished(chatId: string): void {
+    running.delete(chatId)
   }
 
   function scheduleContinue(chatId: string, messageId: string | undefined, delayMs: number): void {
     cancelPending()
     const seconds = Math.max(1, Math.round(delayMs / 1000))
-    announce(strings.waiting(seconds))
+    announce(chatId, strings.waiting(seconds))
     const timer = window.setTimeout(() => {
       pending = null
       void fireContinue(chatId, messageId)
@@ -273,74 +333,72 @@ export function setup(ctx: SpindleFrontendContext) {
   }
 
   async function fireContinue(chatId: string, messageId: string | undefined): Promise<void> {
-    if (destroyed || !config.enabled) return
+    if (destroyed) return
+    if (!config.enabled) return skip(chatId, strings.skipped('disabled'))
 
     // Everything is re-checked here: the wait gave the user time to switch
     // chats, start their own reply, or close the chat entirely.
-    if (ctx.getActiveChat().chatId !== chatId) return
-    if (isRunning(chatId)) return
+    if (ctx.getActiveChat().chatId !== chatId) return skip(chatId, strings.skipped('other-chat'))
+    if (isRunning(chatId)) return skip(chatId, strings.skipped('already-generating'))
 
     const surfaces = ctx.host.surfaces
-    if (!surfaces) return
+    if (!surfaces) return skip(chatId, strings.skipped('no-host-commands'))
     const available = surfaces
       .list(['command'])
       .some((surface) => surface.id === CONTINUE_COMMAND && surface.invocable !== false)
-    if (!available) {
-      console.warn('[lumi_autocontinue] the host does not expose action-continue to this extension')
-      return
-    }
+    if (!available) return skip(chatId, strings.skipped('continue-command-unavailable'))
 
-    if (!claimChat(chatId)) return
+    if (!claimChat(chatId)) return skip(chatId, strings.skipped('another-window-claimed-it'))
 
-    const record = attempts.get(chatId) ?? { count: 0, messageId, at: Date.now() }
-    record.count += 1
-    record.messageId = messageId
-    record.at = Date.now()
-    attempts.set(chatId, record)
+    const record_ = attempts.get(chatId) ?? { count: 0, messageId, at: Date.now() }
+    record_.count += 1
+    record_.messageId = messageId
+    record_.at = Date.now()
+    attempts.set(chatId, record_)
 
-    announce(strings.continuing(record.count, config.maxAttempts))
+    announce(chatId, strings.continuing(record_.count, config.maxAttempts))
     try {
       await surfaces.invoke({ kind: 'command', id: CONTINUE_COMMAND })
     } catch (error) {
       console.warn('[lumi_autocontinue] continue failed to start', error)
-      announce(strings.failed)
+      announce(chatId, strings.failed)
     }
   }
 
   function onGenerationEnded(raw: unknown): void {
     const payload = (raw ?? {}) as GenerationEndedLike
     const chatId = str(payload.chatId)
-    const generationId = str(payload.generationId)
     if (!chatId) return
-    markFinished(chatId, generationId)
-
-    if (!config.enabled) return
+    markFinished(chatId)
 
     const error = str(payload.error) ?? str(payload.errorMessage)
     const truncated = !error && str(payload.finish_reason) === 'length'
 
-    // A clean finish closes the book on this reply.
+    // A clean finish closes the book on this reply, and is not worth a log line.
     if (!error && !truncated) {
       attempts.delete(chatId)
       cancelPending(chatId)
       return
     }
-    if (truncated && !config.continueOnTruncated) return
+
+    if (!config.enabled) return skip(chatId, strings.skipped('disabled'))
+    if (truncated && !config.continueOnTruncated) return skip(chatId, strings.skipped('truncated-off'))
 
     // Only the two generation types that extend the tail assistant message.
     // A swipe or background swipe writes into a slot that may not be the
     // selected one, and continue would extend the wrong text.
     const generationType = str(payload.generationType) ?? 'normal'
-    if (generationType !== 'normal' && generationType !== 'continue') return
+    if (generationType !== 'normal' && generationType !== 'continue') {
+      return skip(chatId, strings.skipped(`generation-type:${generationType}`))
+    }
 
     // Nothing arrived before the socket died: there is no partial reply to
     // extend, and continuing an empty message is not what the user wants.
     const content = str(payload.content)
-    if (!content || !content.trim()) return
+    if (!content || !content.trim()) return skip(chatId, strings.skipped('no-partial-text'))
 
-    if (!ownsGeneration(payload)) return
-    if (ctx.getActiveChat().chatId !== chatId) return
-    if (isRunning(chatId)) return
+    if (ctx.getActiveChat().chatId !== chatId) return skip(chatId, strings.skipped('other-chat'))
+    if (isRunning(chatId)) return skip(chatId, strings.skipped('already-generating'))
 
     const verdict = error
       ? classifyGenerationFailure(
@@ -349,22 +407,16 @@ export function setup(ctx: SpindleFrontendContext) {
         )
       : { retry: true, slow: false, reason: 'truncated' }
 
-    if (!verdict.retry) {
-      console.info(`[lumi_autocontinue] leaving this one alone (${verdict.reason})`)
-      return
-    }
+    if (!verdict.retry) return skip(chatId, strings.declined(verdict.reason))
 
     const messageId = str(payload.messageId)
-    let record = attempts.get(chatId)
-    if (record && (record.messageId !== messageId || Date.now() - record.at > ATTEMPT_RESET_MS)) {
-      record = undefined
+    let spentRecord = attempts.get(chatId)
+    if (spentRecord && (spentRecord.messageId !== messageId || Date.now() - spentRecord.at > ATTEMPT_RESET_MS)) {
+      spentRecord = undefined
       attempts.delete(chatId)
     }
-    const spent = record?.count ?? 0
-    if (spent >= config.maxAttempts) {
-      announce(strings.exhausted(config.maxAttempts))
-      return
-    }
+    const spent = spentRecord?.count ?? 0
+    if (spent >= config.maxAttempts) return announce(chatId, strings.exhausted(config.maxAttempts))
 
     const base = config.delaySeconds * 1000 * 2 ** spent
     const delayMs = Math.min(MAX_DELAY_MS, verdict.slow ? Math.max(base, SLOW_FLOOR_MS) : base)
@@ -388,7 +440,7 @@ export function setup(ctx: SpindleFrontendContext) {
       const payload = (raw ?? {}) as GenerationEndedLike
       const chatId = str(payload.chatId)
       if (!chatId) return
-      markFinished(chatId, str(payload.generationId))
+      markFinished(chatId)
       // A stop is a decision. Do not undo it by continuing.
       cancelPending(chatId)
       attempts.delete(chatId)
@@ -414,17 +466,31 @@ export function setup(ctx: SpindleFrontendContext) {
       position: 'bottom',
     })
     disposers.push(() => tab.destroy())
-    buildSettingsPanel(ctx, tab.root, strings, () => config, (patch) => {
-      config = normalizeConfig({ ...config, ...patch })
-      void settings.set(SETTINGS_KEY, config).catch(() => {
-        /* a failed write leaves the in-memory value in charge */
-      })
+    const panel = buildSettingsPanel(
+      ctx,
+      tab.root,
+      strings,
+      () => config,
+      (patch) => {
+        config = normalizeConfig({ ...config, ...patch })
+        void settings.set(SETTINGS_KEY, config).catch(() => {
+          /* a failed write leaves the in-memory value in charge */
+        })
+      },
+      () => decisions,
+    )
+    renderLog = panel.renderLog
+    renderLog()
+    disposers.push(tab.onActivate(() => renderLog?.()))
+    disposers.push(() => {
+      renderLog = null
     })
   }
 
   if (!ctx.host.surfaces) {
     console.warn('[lumi_autocontinue] this host exposes no command surfaces; the extension cannot continue anything')
   }
+  console.info('[lumi_autocontinue] watching for dropped connections')
 
   return () => {
     destroyed = true
@@ -446,7 +512,8 @@ function buildSettingsPanel(
   strings: Strings,
   read: () => Config,
   write: (patch: Partial<Config>) => void,
-): void {
+  readDecisions: () => readonly Decision[],
+): { renderLog: () => void } {
   const panel = ctx.dom.createElement('div', { class: 'lac-settings' })
   root.appendChild(panel)
 
@@ -525,6 +592,41 @@ function buildSettingsPanel(
     onChange: (value) => write({ blockWords: value }),
   })
 
+  // Decision log: the answer to "why did nothing happen?", readable without
+  // opening developer tools.
+  const logBox = ctx.dom.createElement('div', { class: 'lac-logbox' })
+  const logTitle = ctx.dom.createElement('div', { class: 'lac-policy-title' })
+  logTitle.textContent = strings.logTitle
+  const logHelp = ctx.dom.createElement('p', { class: 'lac-help' })
+  logHelp.textContent = strings.logHelp
+  const logList = ctx.dom.createElement('ul', { class: 'lac-log' })
+  logBox.appendChild(logTitle)
+  logBox.appendChild(logHelp)
+  logBox.appendChild(logList)
+  panel.appendChild(logBox)
+
+  const renderLog = (): void => {
+    const entries = readDecisions()
+    logList.textContent = ''
+    if (entries.length === 0) {
+      const empty = ctx.dom.createElement('li')
+      empty.textContent = strings.logEmpty
+      logList.appendChild(empty)
+      return
+    }
+    for (const entry of entries) {
+      const item = ctx.dom.createElement('li')
+      let stamp: string
+      try {
+        stamp = new Date(entry.at).toLocaleTimeString()
+      } catch {
+        stamp = ''
+      }
+      item.textContent = stamp ? `${stamp} — ${entry.text}` : entry.text
+      logList.appendChild(item)
+    }
+  }
+
   const policy = ctx.dom.createElement('div', { class: 'lac-policy' })
   const policyTitle = ctx.dom.createElement('div', { class: 'lac-policy-title' })
   policyTitle.textContent = strings.policyTitle
@@ -533,4 +635,6 @@ function buildSettingsPanel(
   policy.appendChild(policyTitle)
   policy.appendChild(policyBody)
   panel.appendChild(policy)
+
+  return { renderLog }
 }

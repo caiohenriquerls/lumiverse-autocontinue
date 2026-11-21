@@ -67,9 +67,10 @@ são checadas antes de qualquer regra interna.
   Impersonate e quiet também ficam fora.
 - **Só no chat ativo.** O Continue do host age no chat que está aberto, então se
   você saiu do chat durante a espera, ela desiste.
-- **Só uma aba.** O host marca na mensagem qual aba começou a geração, e só essa
-  aba age. Quando a marca não vem, vale a aba visível, com uma reserva de 15
-  segundos no `localStorage`.
+- **Só uma janela.** Antes de continuar, a janela reserva o chat por 15
+  segundos no `localStorage`, então duas janelas abertas produzem um continue
+  só. A reserva é reentrante para a janela que a tem, então a sua segunda
+  tentativa nunca é barrada pela sua primeira.
 - **Nunca em cima de outra geração.** Ela acompanha
   `GENERATION_STARTED` / `ENDED` / `STOPPED` e cancela a espera assim que
   qualquer geração começa nesse chat — inclusive uma sua.
@@ -127,6 +128,7 @@ Em **Settings → Continuar automático**:
   resposta longa cresce sozinha.
 - **Anunciar o que está fazendo** — ligado por padrão.
 - **Nunca continuar quando o erro mencionar** — suas palavras, uma por linha.
+- **Decisões recentes** — as últimas 20 decisões dele, com o motivo.
 
 ## Acessibilidade
 
@@ -137,13 +139,38 @@ continues automáticos. A bola está com você." Os textos saem em português
 quando o navegador está em `pt`, e em inglês no resto. Dá para desligar o
 anúncio — a informação continua indo para o console do navegador.
 
+## Por que ele não continuou?
+
+Toda falha que ele poderia ter continuado deixa uma linha em **Settings →
+Continuar automático → Decisões recentes**, a mais nova primeiro, e a mesma
+linha vai para o console do navegador com o prefixo `[lumi_autocontinue]`. A
+linha diz ou o veredito da política (`Não continuei: permanent:payment`) ou a
+trava que barrou (`Não continuei, trava: other-chat`). Log vazio depois de uma
+resposta que falhou significa que a extensão não está rodando naquela página —
+confira se ela está habilitada e se a permissão `generation` foi concedida.
+
 ## Situação
 
-A política de erros tem teste de unidade contra 32 payloads no formato das
-falhas reais de provedor (`bun test`). O caminho de ponta a ponta — evento,
-espera, invoke — ainda não foi exercitado contra uma queda real de provedor num
-Lumiverse rodando, então trate a versão 1.0.0 como funcional porém não provada,
-e relate qualquer coisa estranha.
+A 1.0.1 é a versão que vale rodar. A 1.0.0 tinha dois defeitos capazes de fazer
+ela não fazer nada, os dois descobertos na primeira queda de conexão real:
+
+- Ela comparava o id do documento que veio no evento com o seu próprio e
+  desistia quando diferiam. Esse id é a sessão de frontend que o servidor
+  considera dona da execução no momento, que com duas janelas do Lumiverse
+  abertas não é necessariamente a que você está lendo. Agora quem resolve o
+  disparo único é a reserva no `localStorage`.
+- Toda recusa era silenciosa, então "pulou uma falha continuável" e "não está
+  carregada" ficavam idênticos de fora. Daí o log de decisões.
+
+Também corrigido: um chat cuja geração nunca reportou evento terminal ficava
+"ocupado" para sempre e desligava a extensão ali sem avisar; e a segunda
+tentativa podia ser barrada pela reserva da primeira.
+
+A política de erros tem teste de unidade contra 34 payloads no formato das
+falhas reais de provedor, incluindo o caso de campo que expôs tudo isso, e a
+cadeia de travas tem 11 testes jogando payloads reais dentro do `setup()` com
+um host falso (`bun test`). O caminho ainda não foi observado de ponta a ponta
+contra uma queda ao vivo, então relate qualquer coisa estranha.
 
 Limites conhecidos:
 
@@ -161,7 +188,7 @@ bun run check   # typecheck + testes + build
 - `src/error-policy.ts` — a decisão. Pura, sem dependência do host, testada por
   `src/error-policy.test.ts`.
 - `src/frontend.ts` — eventos, travas, a espera, o invoke do Continue e o painel
-  de configurações.
+  de configurações. O `src/frontend.test.ts` exercita isso com um host falso.
 - `src/strings.ts` — textos em inglês e português.
 
 O `dist/frontend.js` é commitado de propósito: o Lumiverse trata um `dist/`

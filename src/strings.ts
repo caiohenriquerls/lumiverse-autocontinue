@@ -22,6 +22,11 @@ export type Strings = {
   readonly blockPlaceholder: string
   readonly policyTitle: string
   readonly policyBody: string
+  readonly logTitle: string
+  readonly logHelp: string
+  readonly logEmpty: string
+  readonly declined: (reason: string) => string
+  readonly skipped: (guard: string) => string
   readonly waiting: (seconds: number) => string
   readonly continuing: (attempt: number, max: number) => string
   readonly exhausted: (max: number) => string
@@ -50,6 +55,11 @@ const EN: Strings = {
   policyTitle: 'What it never retries',
   policyBody:
     'Payment, credit, quota and plan limits; invalid or missing API keys and every other credential failure; moderation and content policy; context length, unknown models and malformed requests; a generation you stopped yourself. An error it does not recognise is left alone too.',
+  logTitle: 'Recent decisions',
+  logHelp: 'Newest first. Every failure it could have continued leaves a line here, including the ones it chose not to continue.',
+  logEmpty: 'Nothing recorded yet — no generation has failed since this page loaded.',
+  declined: (reason) => `Did not continue: ${reason}.`,
+  skipped: (guard) => `Did not continue, guard: ${guard}.`,
   waiting: (seconds) => `Connection lost. Continuing in ${seconds}s...`,
   continuing: (attempt, max) => `Continuing the reply (attempt ${attempt} of ${max}).`,
   exhausted: (max) => `Stopped after ${max} automatic continues. Over to you.`,
@@ -78,6 +88,11 @@ const PT: Strings = {
   policyTitle: 'O que ele nunca repete',
   policyBody:
     'Pagamento, crédito, cota e limite de plano; chave de API inválida ou ausente e qualquer outra falha de credencial; moderação e política de conteúdo; tamanho de contexto, modelo desconhecido e requisição malformada; geração que você mesmo parou. Erro que ele não reconhece também fica quieto.',
+  logTitle: 'Decisões recentes',
+  logHelp: 'Mais recente primeiro. Toda falha que ele poderia ter continuado deixa uma linha aqui, inclusive as que ele escolheu não continuar.',
+  logEmpty: 'Nada registrado ainda — nenhuma geração falhou desde que esta página carregou.',
+  declined: (reason) => `Não continuei: ${reason}.`,
+  skipped: (guard) => `Não continuei, trava: ${guard}.`,
   waiting: (seconds) => `Conexão caiu. Continuando em ${seconds}s...`,
   continuing: (attempt, max) => `Continuando a resposta (tentativa ${attempt} de ${max}).`,
   exhausted: (max) => `Parei depois de ${max} continues automáticos. A bola está com você.`,

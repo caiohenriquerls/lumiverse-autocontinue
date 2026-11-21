@@ -10,6 +10,11 @@ import { expect, test } from 'bun:test'
 import { classifyGenerationFailure } from './error-policy'
 
 const continues = [
+  // Seen in the field on 2026-11-21: a 12k-character reply cut off mid-stream.
+  // Bun's fetch timeout carries no provider code, so the host falls back to
+  // `generation_failed` and the message is all there is to go on.
+  { errorCode: 'generation_failed', error: 'The operation timed out.' },
+  { errorCode: 'TimeoutError', error: 'The operation timed out.' },
   { errorCode: 'ECONNRESET', error: 'read ECONNRESET' },
   { errorCode: 'ConnectionClosed', error: 'The socket connection was closed unexpectedly' },
   { errorCode: 'generation_failed', error: 'terminated' },

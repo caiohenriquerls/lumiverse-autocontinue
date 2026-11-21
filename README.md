@@ -64,9 +64,10 @@ checked before every built-in rule.
   extend the wrong text. Impersonate and quiet generations are skipped too.
 - **Only in the active chat.** The host's Continue acts on whatever chat is
   open, so if you navigated away during the wait, it gives up.
-- **Only one tab.** The host stamps the originating document on the payload and
-  only that tab acts. When the stamp is missing, the visible tab acts, guarded
-  by a 15-second `localStorage` claim.
+- **Only one window.** Before continuing, a document takes a 15-second claim on
+  the chat in `localStorage`, so two open windows produce one continue. The
+  claim is re-entrant for the window that holds it, so your own second attempt
+  is never locked out by your own first.
 - **Never on top of another generation.** It follows
   `GENERATION_STARTED` / `ENDED` / `STOPPED` and cancels its pending continue as
   soon as anything starts generating in that chat — including you.
@@ -121,6 +122,7 @@ server, then **Add Extension** → **Import Local** as owner or admin.
   replies grow on their own.
 - **Announce what it is doing** — on by default.
 - **Never continue when the error mentions** — your own words, one per line.
+- **Recent decisions** — the last 20 things it decided and why.
 
 ## Accessibility
 
@@ -131,12 +133,38 @@ automatic continues. Over to you." Strings are Portuguese when the browser
 locale is `pt`, English otherwise. The announcement can be turned off; the same
 information still goes to the browser console.
 
+## Why didn't it continue?
+
+Every failure it could have continued leaves a line in **Settings →
+Auto-Continue → Recent decisions**, newest first, and the same line goes to the
+browser console prefixed with `[lumi_autocontinue]`. A line names either the
+policy verdict (`Did not continue: permanent:payment`) or the guard that
+stopped it (`Did not continue, guard: other-chat`). An empty log after a failed
+reply means the extension is not running in that page at all — check that it is
+enabled and that `generation` is granted.
+
 ## Status
 
-The error policy is unit-tested against 32 payloads shaped like real provider
-failures (`bun test`). The end-to-end path — event, wait, invoke — has not yet
-been exercised against a real provider drop in a running Lumiverse, so treat
-version 1.0.0 as working-but-unproven and report anything odd.
+1.0.1 is the version worth running. 1.0.0 had two defects that could make it do
+nothing at all, both found the first time a real connection drop hit it:
+
+- It compared the originating document id on the payload against its own and
+  skipped on a mismatch. That id is whichever frontend session the server
+  currently treats as the execution owner, which with two Lumiverse windows
+  open is not necessarily the one you are reading. The claim in `localStorage`
+  now settles single-firing instead.
+- Every refusal was silent, so "it skipped a continuable failure" and "it is
+  not loaded" looked identical from the outside. Hence the decision log.
+
+Also fixed: a chat whose generation never reported a terminal event stayed
+"busy" forever and quietly disabled the extension there; and a second attempt
+could be blocked by the first attempt's own cross-window claim.
+
+The error policy is unit-tested against 34 payloads shaped like real provider
+failures, including the field case that exposed all of the above, and the guard
+chain has 11 tests driving real payloads through `setup()` with a fake host
+(`bun test`). The path has still not been watched end to end against a live
+provider drop, so report anything odd.
 
 Known limits:
 
@@ -154,7 +182,7 @@ bun run check   # typecheck + tests + build
 - `src/error-policy.ts` — the decision. Pure, no host dependency, tested by
   `src/error-policy.test.ts`.
 - `src/frontend.ts` — events, guards, the wait, the Continue invoke, and the
-  settings panel.
+  settings panel. `src/frontend.test.ts` drives it with a fake host context.
 - `src/strings.ts` — English and Portuguese strings.
 
 `dist/frontend.js` is committed on purpose: Lumiverse treats a tracked `dist/`
