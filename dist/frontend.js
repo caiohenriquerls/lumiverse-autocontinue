@@ -274,9 +274,9 @@ function pickStrings() {
 }
 
 // src/frontend.ts
-var SETTINGS_KEY = "config";
-var DECISIONS_KEY = "decisions";
-var STATUS_KEY = "status";
+var SETTINGS_KEY = "autocontinue:config";
+var DECISIONS_KEY = "autocontinue:decisions";
+var STATUS_KEY = "autocontinue:status";
 var CONTINUE_COMMAND = "action-continue";
 var CLAIM_PREFIX = "spindle:lumi_autocontinue:claim:";
 var CLAIM_TTL_MS = 15000;
@@ -338,103 +338,102 @@ function claimChat(chatId) {
     return true;
   }
 }
+function attempt(what, run) {
+  try {
+    run();
+  } catch (error) {
+    console.error(`[lumi_autocontinue] ${what} failed, continuing without it`, error);
+  }
+}
 function setup(ctx) {
   const strings = pickStrings();
   const disposers = [];
   let config = { ...DEFAULTS };
   let destroyed = false;
-  const removeStyle = ctx.dom.addStyle(`
-    .lac-notice {
-      position: fixed;
-      bottom: 14px;
-      left: 50%;
-      transform: translateX(-50%);
-      max-width: min(520px, 90vw);
-      padding: 7px 14px;
-      border: 1px solid var(--lumiverse-border, rgba(127,127,127,.4));
-      border-radius: var(--lumiverse-radius, 8px);
-      background: var(--lumiverse-bg-elevated, var(--lumiverse-fill-subtle, rgba(20,20,20,.92)));
-      color: var(--lumiverse-text, inherit);
-      font-size: 12px;
-      line-height: 1.4;
-      text-align: center;
-      z-index: 2147483000;
-      pointer-events: none;
-      opacity: 0;
-      transition: opacity 140ms ease-in-out;
-    }
-    .lac-notice[data-visible="true"] { opacity: 1; }
-    .lac-settings { display: flex; flex-direction: column; gap: 18px; }
-    .lac-row { display: flex; align-items: flex-start; gap: 16px; justify-content: space-between; }
-    .lac-row-main { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
-    .lac-label { font-size: 13px; font-weight: 600; color: var(--lumiverse-text, inherit); }
-    .lac-help { margin: 0; font-size: 12px; line-height: 1.45; color: var(--lumiverse-text-muted, inherit); }
-    .lac-control { flex: 0 0 auto; min-width: 96px; display: flex; justify-content: flex-end; }
-    .lac-block { display: flex; flex-direction: column; gap: 6px; }
-    .lac-policy, .lac-logbox {
-      padding: 12px 14px;
-      border: 1px solid var(--lumiverse-border, rgba(127,127,127,.4));
-      border-radius: var(--lumiverse-radius, 8px);
-      background: var(--lumiverse-fill-subtle, transparent);
-    }
-    .lac-policy-title { font-size: 13px; font-weight: 600; margin-bottom: 4px; }
-    .lac-log { margin: 8px 0 0; padding-left: 18px; font-size: 12px; line-height: 1.6; }
-    .lac-log li { color: var(--lumiverse-text-muted, inherit); }
-  `);
-  disposers.push(removeStyle);
-  const noticeWrapper = ctx.dom.inject("body", '<div class="lac-notice" role="status" aria-live="polite" aria-atomic="true"></div>');
-  const notice = noticeWrapper.querySelector(".lac-notice") ?? noticeWrapper;
-  let noticeTimer = null;
   let decisions = [];
   let renderLog = null;
   function record(chatId, text) {
     decisions = [{ at: Date.now(), chatId, text }, ...decisions].slice(0, MAX_DECISIONS);
-    renderLog?.();
-    ctx.settings?.set(DECISIONS_KEY, decisions).catch(() => {});
+    try {
+      renderLog?.();
+    } catch {}
+    try {
+      ctx.settings?.set(DECISIONS_KEY, decisions).catch(() => {});
+    } catch {}
   }
+  let notice = null;
+  let noticeTimer = null;
+  attempt("status line", () => {
+    const removeStyle = ctx.dom.addStyle(`
+      .lac-notice {
+        position: fixed;
+        bottom: 14px;
+        left: 50%;
+        transform: translateX(-50%);
+        max-width: min(520px, 90vw);
+        padding: 7px 14px;
+        border: 1px solid var(--lumiverse-border, rgba(127,127,127,.4));
+        border-radius: var(--lumiverse-radius, 8px);
+        background: var(--lumiverse-bg-elevated, var(--lumiverse-fill-subtle, rgba(20,20,20,.92)));
+        color: var(--lumiverse-text, inherit);
+        font-size: 12px;
+        line-height: 1.4;
+        text-align: center;
+        z-index: 2147483000;
+        pointer-events: none;
+        opacity: 0;
+        transition: opacity 140ms ease-in-out;
+      }
+      .lac-notice[data-visible="true"] { opacity: 1; }
+      .lac-settings { display: flex; flex-direction: column; gap: 18px; }
+      .lac-row { display: flex; align-items: flex-start; gap: 16px; justify-content: space-between; }
+      .lac-row-main { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+      .lac-label { font-size: 13px; font-weight: 600; color: var(--lumiverse-text, inherit); }
+      .lac-help { margin: 0; font-size: 12px; line-height: 1.45; color: var(--lumiverse-text-muted, inherit); }
+      .lac-control { flex: 0 0 auto; min-width: 96px; display: flex; justify-content: flex-end; }
+      .lac-block { display: flex; flex-direction: column; gap: 6px; }
+      .lac-policy, .lac-logbox {
+        padding: 12px 14px;
+        border: 1px solid var(--lumiverse-border, rgba(127,127,127,.4));
+        border-radius: var(--lumiverse-radius, 8px);
+        background: var(--lumiverse-fill-subtle, transparent);
+      }
+      .lac-policy-title { font-size: 13px; font-weight: 600; margin-bottom: 4px; }
+      .lac-log { margin: 8px 0 0; padding-left: 18px; font-size: 12px; line-height: 1.6; }
+      .lac-log li { color: var(--lumiverse-text-muted, inherit); }
+    `);
+    disposers.push(removeStyle);
+    const noticeWrapper = ctx.dom.inject("body", '<div class="lac-notice" role="status" aria-live="polite" aria-atomic="true"></div>');
+    notice = noticeWrapper.querySelector(".lac-notice") ?? noticeWrapper;
+    disposers.push(() => {
+      if (noticeTimer !== null)
+        window.clearTimeout(noticeTimer);
+      ctx.dom.uninject(noticeWrapper);
+    });
+  });
   function announce(chatId, text) {
     if (destroyed)
       return;
     console.info(`[lumi_autocontinue] ${text}`);
     record(chatId, text);
-    if (!config.announce)
+    if (!config.announce || !notice)
       return;
-    notice.textContent = text;
-    notice.setAttribute("data-visible", "true");
-    if (noticeTimer !== null)
-      window.clearTimeout(noticeTimer);
-    noticeTimer = window.setTimeout(() => {
-      noticeTimer = null;
-      notice.setAttribute("data-visible", "false");
-      notice.textContent = "";
-    }, NOTICE_TTL_MS);
+    attempt("notice", () => {
+      const target = notice;
+      target.textContent = text;
+      target.setAttribute("data-visible", "true");
+      if (noticeTimer !== null)
+        window.clearTimeout(noticeTimer);
+      noticeTimer = window.setTimeout(() => {
+        noticeTimer = null;
+        target.setAttribute("data-visible", "false");
+        target.textContent = "";
+      }, NOTICE_TTL_MS);
+    });
   }
   function skip(chatId, text) {
     console.info(`[lumi_autocontinue] ${text}`);
     record(chatId, text);
-  }
-  disposers.push(() => {
-    if (noticeTimer !== null)
-      window.clearTimeout(noticeTimer);
-    ctx.dom.uninject(noticeWrapper);
-  });
-  const settings = ctx.settings;
-  if (settings) {
-    settings.get(SETTINGS_KEY).then((stored) => {
-      if (!destroyed && stored !== undefined)
-        config = normalizeConfig(stored);
-    }).catch(() => {});
-    settings.get(DECISIONS_KEY).then((stored) => {
-      if (destroyed || !Array.isArray(stored))
-        return;
-      const restored = stored.filter((entry) => !!entry && typeof entry.at === "number" && typeof entry.text === "string");
-      decisions = [...decisions, ...restored].slice(0, MAX_DECISIONS);
-      renderLog?.();
-    }).catch(() => {});
-    const unwatch = settings.watch(SETTINGS_KEY, (stored) => {
-      config = normalizeConfig(stored);
-    });
-    disposers.push(unwatch);
   }
   const running = new Map;
   const attempts = new Map;
@@ -495,12 +494,12 @@ function setup(ctx) {
       return skip(chatId, strings.skipped("continue-command-unavailable"));
     if (!claimChat(chatId))
       return skip(chatId, strings.skipped("another-window-claimed-it"));
-    const record_ = attempts.get(chatId) ?? { count: 0, messageId, at: Date.now() };
-    record_.count += 1;
-    record_.messageId = messageId;
-    record_.at = Date.now();
-    attempts.set(chatId, record_);
-    announce(chatId, strings.continuing(record_.count, config.maxAttempts));
+    const spent = attempts.get(chatId) ?? { count: 0, messageId, at: Date.now() };
+    spent.count += 1;
+    spent.messageId = messageId;
+    spent.at = Date.now();
+    attempts.set(chatId, spent);
+    announce(chatId, strings.continuing(spent.count, config.maxAttempts));
     try {
       await surfaces.invoke({ kind: "command", id: CONTINUE_COMMAND });
     } catch (error) {
@@ -574,25 +573,51 @@ function setup(ctx) {
   disposers.push(ctx.events.on("CHAT_SWITCHED", () => {
     cancelPending();
   }));
-  if (settings && ctx.ui.registerSettingsTab) {
-    const tab = ctx.ui.registerSettingsTab({
-      id: "lumi_autocontinue",
-      title: strings.settingsTitle,
-      shortName: strings.settingsShort,
-      description: strings.settingsDescription,
-      keywords: ["continue", "continuar", "reconnect", "conexao", "retry", "autocontinue"],
-      position: "bottom"
+  const settings = ctx.settings;
+  if (settings) {
+    attempt("settings", () => {
+      settings.get(SETTINGS_KEY).then((stored) => {
+        if (!destroyed && stored !== undefined)
+          config = normalizeConfig(stored);
+      }).catch((error) => {
+        console.warn("[lumi_autocontinue] could not read stored settings", error);
+      });
+      settings.get(DECISIONS_KEY).then((stored) => {
+        if (destroyed || !Array.isArray(stored))
+          return;
+        const restored = stored.filter((entry) => !!entry && typeof entry.at === "number" && typeof entry.text === "string");
+        decisions = [...decisions, ...restored].slice(0, MAX_DECISIONS);
+        renderLog?.();
+      }).catch(() => {});
+      const unwatch = settings.watch(SETTINGS_KEY, (stored) => {
+        config = normalizeConfig(stored);
+      });
+      disposers.push(unwatch);
     });
-    disposers.push(() => tab.destroy());
-    const panel = buildSettingsPanel(ctx, tab.root, strings, () => config, (patch) => {
-      config = normalizeConfig({ ...config, ...patch });
-      settings.set(SETTINGS_KEY, config).catch(() => {});
-    }, () => decisions, ctx.manifest?.version ?? "unknown");
-    renderLog = panel.renderLog;
-    renderLog();
-    disposers.push(tab.onActivate(() => renderLog?.()));
-    disposers.push(() => {
-      renderLog = null;
+  }
+  if (settings && ctx.ui.registerSettingsTab) {
+    attempt("settings panel", () => {
+      const tab = ctx.ui.registerSettingsTab({
+        id: "lumi_autocontinue",
+        title: strings.settingsTitle,
+        shortName: strings.settingsShort,
+        description: strings.settingsDescription,
+        keywords: ["continue", "continuar", "reconnect", "conexao", "retry", "autocontinue"],
+        position: "bottom"
+      });
+      disposers.push(() => tab.destroy());
+      const panel = buildSettingsPanel(ctx, tab.root, strings, () => config, (patch) => {
+        config = normalizeConfig({ ...config, ...patch });
+        settings.set(SETTINGS_KEY, config).catch((error) => {
+          console.warn("[lumi_autocontinue] could not save settings", error);
+        });
+      }, () => decisions, ctx.manifest?.version ?? "unknown");
+      renderLog = panel.renderLog;
+      renderLog();
+      disposers.push(tab.onActivate(() => renderLog?.()));
+      disposers.push(() => {
+        renderLog = null;
+      });
     });
   }
   if (!ctx.host.surfaces) {
@@ -600,13 +625,15 @@ function setup(ctx) {
   }
   const runningVersion = ctx.manifest?.version ?? "unknown";
   console.info(`[lumi_autocontinue] ${runningVersion} watching for dropped connections`);
-  ctx.settings?.set(STATUS_KEY, {
-    version: runningVersion,
-    startedAt: Date.now(),
-    hasCommandSurfaces: !!ctx.host.surfaces,
-    document: DOCUMENT_TOKEN
-  }).catch((error) => {
-    console.warn("[lumi_autocontinue] could not persist the status beacon", error);
+  attempt("status beacon", () => {
+    ctx.settings?.set(STATUS_KEY, {
+      version: runningVersion,
+      startedAt: Date.now(),
+      hasCommandSurfaces: !!ctx.host.surfaces,
+      document: DOCUMENT_TOKEN
+    }).catch((error) => {
+      console.warn("[lumi_autocontinue] could not persist the status beacon", error);
+    });
   });
   return () => {
     destroyed = true;
@@ -733,5 +760,8 @@ function buildSettingsPanel(ctx, root, strings, read, write, readDecisions, runn
   return { renderLog };
 }
 export {
+  DECISIONS_KEY,
+  SETTINGS_KEY,
+  STATUS_KEY,
   setup
 };

@@ -153,26 +153,42 @@ without opening developer tools.
 
 ## Status
 
-1.0.1 is the version worth running. 1.0.0 had two defects that could make it do
-nothing at all, both found the first time a real connection drop hit it:
+**1.0.3 is the first version that runs at all.** 1.0.0 through 1.0.2 were dead
+on arrival, and the cause was one line:
+
+```ts
+ctx.settings.watch('config', ...)   // throws SETTING_KEY_INVALID:config
+```
+
+A private settings key must be `module:name` — two colon-separated segments —
+and `watch()` enforces that *synchronously*. The throw landed inside `setup()`
+before a single event subscription had been registered, so the host tore the
+extension down at load every time. From the outside it looked exactly like an
+extension that quietly decided not to continue anything: three real connection
+drops, no continues, no log lines, no stored settings.
+
+1.0.3 uses valid keys (`autocontinue:config`, `autocontinue:decisions`,
+`autocontinue:status`) and, more importantly, is built so that this class of
+mistake cannot repeat: the event subscriptions are registered first, and every
+optional part — the notice, the stored settings, the panel, the status beacon —
+is wrapped so a failure in it logs and is skipped instead of taking the feature
+down. The fake host in the test suite now enforces the key rule too.
+
+Fixed along the way, while the extension was never actually running:
 
 - It compared the originating document id on the payload against its own and
   skipped on a mismatch. That id is whichever frontend session the server
-  currently treats as the execution owner, which with two Lumiverse windows
-  open is not necessarily the one you are reading. The claim in `localStorage`
-  now settles single-firing instead.
-- Every refusal was silent, so "it skipped a continuable failure" and "it is
-  not loaded" looked identical from the outside. Hence the decision log.
-
-Also fixed: a chat whose generation never reported a terminal event stayed
-"busy" forever and quietly disabled the extension there; and a second attempt
-could be blocked by the first attempt's own cross-window claim.
+  treats as the execution owner, which with two Lumiverse windows open is not
+  necessarily the one you are reading. The `localStorage` claim settles
+  single-firing instead, re-entrant for the window that holds it.
+- Every refusal was silent. Hence the decision log and the status beacon.
+- A chat whose generation never reported a terminal event stayed "busy"
+  forever, disabling the extension there with no trace.
 
 The error policy is unit-tested against 34 payloads shaped like real provider
-failures, including the field case that exposed all of the above, and the guard
-chain has 11 tests driving real payloads through `setup()` with a fake host
-(`bun test`). The path has still not been watched end to end against a live
-provider drop, so report anything odd.
+failures, and the guard chain has 13 tests driving real payloads through
+`setup()` with a fake host (`bun test`). The path has still not been watched
+end to end against a live provider drop, so report anything odd.
 
 Known limits:
 

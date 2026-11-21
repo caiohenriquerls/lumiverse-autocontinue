@@ -159,26 +159,45 @@ qual build está viva sem abrir as ferramentas de desenvolvedor.
 
 ## Situação
 
-A 1.0.1 é a versão que vale rodar. A 1.0.0 tinha dois defeitos capazes de fazer
-ela não fazer nada, os dois descobertos na primeira queda de conexão real:
+**A 1.0.3 é a primeira versão que roda.** Da 1.0.0 até a 1.0.2 a extensão
+estava morta no nascimento, e a causa era uma linha só:
+
+```ts
+ctx.settings.watch('config', ...)   // joga SETTING_KEY_INVALID:config
+```
+
+Chave privada de configuração tem que ser `modulo:nome` — dois segmentos
+separados por dois-pontos — e o `watch()` cobra isso de forma *síncrona*. A
+exceção estourava dentro do `setup()` antes de qualquer assinatura de evento
+existir, então o host derrubava a extensão inteira no carregamento, toda vez.
+De fora parecia exatamente uma extensão que decidiu em silêncio não continuar
+nada: três quedas de conexão reais, nenhum continue, nenhuma linha de log,
+nenhuma configuração gravada.
+
+A 1.0.3 usa chaves válidas (`autocontinue:config`, `autocontinue:decisions`,
+`autocontinue:status`) e, mais importante, é construída para esse tipo de erro
+não se repetir: as assinaturas de evento são registradas primeiro, e toda parte
+opcional — o aviso, as configurações gravadas, o painel, o farol de status —
+fica embrulhada para que uma falha nela registre e siga em frente em vez de
+levar a funcionalidade junto. O host falso dos testes agora também cobra a
+regra das chaves.
+
+Corrigido no caminho, enquanto a extensão nunca estava de fato rodando:
 
 - Ela comparava o id do documento que veio no evento com o seu próprio e
   desistia quando diferiam. Esse id é a sessão de frontend que o servidor
-  considera dona da execução no momento, que com duas janelas do Lumiverse
-  abertas não é necessariamente a que você está lendo. Agora quem resolve o
-  disparo único é a reserva no `localStorage`.
-- Toda recusa era silenciosa, então "pulou uma falha continuável" e "não está
-  carregada" ficavam idênticos de fora. Daí o log de decisões.
-
-Também corrigido: um chat cuja geração nunca reportou evento terminal ficava
-"ocupado" para sempre e desligava a extensão ali sem avisar; e a segunda
-tentativa podia ser barrada pela reserva da primeira.
+  considera dona da execução, que com duas janelas do Lumiverse abertas não é
+  necessariamente a que você está lendo. Quem resolve o disparo único agora é a
+  reserva no `localStorage`, reentrante para a janela que a tem.
+- Toda recusa era silenciosa. Daí o log de decisões e o farol de status.
+- Um chat cuja geração nunca reportou evento terminal ficava "ocupado" para
+  sempre, desligando a extensão ali sem deixar rastro.
 
 A política de erros tem teste de unidade contra 34 payloads no formato das
-falhas reais de provedor, incluindo o caso de campo que expôs tudo isso, e a
-cadeia de travas tem 11 testes jogando payloads reais dentro do `setup()` com
-um host falso (`bun test`). O caminho ainda não foi observado de ponta a ponta
-contra uma queda ao vivo, então relate qualquer coisa estranha.
+falhas reais de provedor, e a cadeia de travas tem 13 testes jogando payloads
+reais dentro do `setup()` com um host falso (`bun test`). O caminho ainda não
+foi observado de ponta a ponta contra uma queda ao vivo, então relate qualquer
+coisa estranha.
 
 Limites conhecidos:
 

@@ -16,18 +16,29 @@
  * own command (`action-continue`, the same one the command palette runs), so
  * the reply is produced exactly as a manual continue would produce it.
  *
- * Every path that declines to continue records why, in the console and in a
- * decision log the settings panel renders. A silent extension is impossible to
- * debug, and "it just did nothing" was exactly the bug report that produced
- * this version.
+ * Structure matters here, and the reason is a scar. Versions 1.0.0 to 1.0.2
+ * never ran at all: `ctx.settings.watch('config')` throws synchronously,
+ * because a private settings key must be `module:name` and `config` is one
+ * segment. That throw happened inside `setup()` before a single event
+ * subscription existed, so the host tore the whole extension down at load and
+ * the only trace was one console error nobody was looking at. Now the event
+ * subscriptions are registered first, and everything optional - the notice,
+ * the stored settings, the panel, the status beacon - is wrapped so that a
+ * failure in it can never again take the feature with it.
  */
 
 import type { SpindleFrontendContext } from 'lumiverse-spindle-types'
 import { classifyGenerationFailure } from './error-policy'
 import { pickStrings, type Strings } from './strings'
 
-const SETTINGS_KEY = 'config'
-const DECISIONS_KEY = 'decisions'
+/**
+ * Private settings keys are namespaced by the host as
+ * `spindle:<identifier>:<key>`, and `<key>` itself must be exactly
+ * `module:name`, each segment matching the host's pattern. A single-segment
+ * key is rejected - synchronously, by `watch`.
+ */
+export const SETTINGS_KEY = 'autocontinue:config'
+export const DECISIONS_KEY = 'autocontinue:decisions'
 /**
  * Written once per `setup()`. It is how anyone - including the author, reading
  * the database from outside the browser - can tell which build is actually
@@ -35,7 +46,8 @@ const DECISIONS_KEY = 'decisions'
  * Extensions panel shows: updating an extension does not always replace the
  * module a loaded page is already running.
  */
-const STATUS_KEY = 'status'
+export const STATUS_KEY = 'autocontinue:status'
+
 const CONTINUE_COMMAND = 'action-continue'
 const CLAIM_PREFIX = 'spindle:lumi_autocontinue:claim:'
 /** How long one document's claim on a chat blocks the other documents. */
@@ -128,9 +140,8 @@ const DOCUMENT_TOKEN = `${Date.now()}-${Math.random().toString(36).slice(2)}`
  * The host does not tell an extension which document started a generation:
  * `frontendSessionId` on the payload is whichever session the server currently
  * treats as the execution owner, which with two windows open can be the one
- * you are not looking at. Comparing it against this document's id was how
- * 1.0.0 managed to skip a perfectly continuable failure in silence. So the
- * claim decides, and storage being unavailable must never disable the feature.
+ * you are not looking at. So the claim decides, and storage being unavailable
+ * must never disable the feature.
  *
  * The claim is re-entrant for the document that holds it: our own second
  * attempt on the same reply arrives well inside the TTL and must not be locked
@@ -155,90 +166,120 @@ function claimChat(chatId: string): boolean {
   }
 }
 
+/** Run an optional enhancement. It may fail; the extension may not. */
+function attempt(what: string, run: () => void): void {
+  try {
+    run()
+  } catch (error) {
+    console.error(`[lumi_autocontinue] ${what} failed, continuing without it`, error)
+  }
+}
+
 export function setup(ctx: SpindleFrontendContext) {
   const strings = pickStrings()
   const disposers: Array<() => void> = []
   let config: Config = { ...DEFAULTS }
   let destroyed = false
 
-  // ── Status line ───────────────────────────────────────────────────────────
-  // A polite live region, so a screen reader announces each decision without
-  // stealing focus, and sighted users get the same text as a small pill.
-  const removeStyle = ctx.dom.addStyle(`
-    .lac-notice {
-      position: fixed;
-      bottom: 14px;
-      left: 50%;
-      transform: translateX(-50%);
-      max-width: min(520px, 90vw);
-      padding: 7px 14px;
-      border: 1px solid var(--lumiverse-border, rgba(127,127,127,.4));
-      border-radius: var(--lumiverse-radius, 8px);
-      background: var(--lumiverse-bg-elevated, var(--lumiverse-fill-subtle, rgba(20,20,20,.92)));
-      color: var(--lumiverse-text, inherit);
-      font-size: 12px;
-      line-height: 1.4;
-      text-align: center;
-      z-index: 2147483000;
-      pointer-events: none;
-      opacity: 0;
-      transition: opacity 140ms ease-in-out;
-    }
-    .lac-notice[data-visible="true"] { opacity: 1; }
-    .lac-settings { display: flex; flex-direction: column; gap: 18px; }
-    .lac-row { display: flex; align-items: flex-start; gap: 16px; justify-content: space-between; }
-    .lac-row-main { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
-    .lac-label { font-size: 13px; font-weight: 600; color: var(--lumiverse-text, inherit); }
-    .lac-help { margin: 0; font-size: 12px; line-height: 1.45; color: var(--lumiverse-text-muted, inherit); }
-    .lac-control { flex: 0 0 auto; min-width: 96px; display: flex; justify-content: flex-end; }
-    .lac-block { display: flex; flex-direction: column; gap: 6px; }
-    .lac-policy, .lac-logbox {
-      padding: 12px 14px;
-      border: 1px solid var(--lumiverse-border, rgba(127,127,127,.4));
-      border-radius: var(--lumiverse-radius, 8px);
-      background: var(--lumiverse-fill-subtle, transparent);
-    }
-    .lac-policy-title { font-size: 13px; font-weight: 600; margin-bottom: 4px; }
-    .lac-log { margin: 8px 0 0; padding-left: 18px; font-size: 12px; line-height: 1.6; }
-    .lac-log li { color: var(--lumiverse-text-muted, inherit); }
-  `)
-  disposers.push(removeStyle)
-
-  // `inject` returns its own tracking wrapper, not the markup passed in, so the
-  // live region has to be queried back out of it before anything writes to it.
-  const noticeWrapper = ctx.dom.inject(
-    'body',
-    '<div class="lac-notice" role="status" aria-live="polite" aria-atomic="true"></div>',
-  )
-  const notice = noticeWrapper.querySelector('.lac-notice') ?? noticeWrapper
-  let noticeTimer: number | null = null
-
   // ── Decision log ──────────────────────────────────────────────────────────
+  // In memory first, persisted only as a best effort. The settings API is an
+  // enhancement here, never a dependency.
   let decisions: Decision[] = []
   let renderLog: (() => void) | null = null
 
   function record(chatId: string, text: string): void {
     decisions = [{ at: Date.now(), chatId, text }, ...decisions].slice(0, MAX_DECISIONS)
-    renderLog?.()
-    void ctx.settings?.set(DECISIONS_KEY, decisions).catch(() => {
-      /* the in-memory log still works without persistence */
-    })
+    try {
+      renderLog?.()
+    } catch {
+      /* the panel is not worth a failed decision */
+    }
+    try {
+      void ctx.settings?.set(DECISIONS_KEY, decisions).catch(() => {
+        /* the in-memory log still works without persistence */
+      })
+    } catch {
+      /* a synchronous rejection from a bad key must not reach the caller */
+    }
   }
+
+  // ── Status line ───────────────────────────────────────────────────────────
+  // A polite live region, so a screen reader announces each decision without
+  // stealing focus, and sighted users get the same text as a small pill.
+  let notice: Element | null = null
+  let noticeTimer: number | null = null
+
+  attempt('status line', () => {
+    const removeStyle = ctx.dom.addStyle(`
+      .lac-notice {
+        position: fixed;
+        bottom: 14px;
+        left: 50%;
+        transform: translateX(-50%);
+        max-width: min(520px, 90vw);
+        padding: 7px 14px;
+        border: 1px solid var(--lumiverse-border, rgba(127,127,127,.4));
+        border-radius: var(--lumiverse-radius, 8px);
+        background: var(--lumiverse-bg-elevated, var(--lumiverse-fill-subtle, rgba(20,20,20,.92)));
+        color: var(--lumiverse-text, inherit);
+        font-size: 12px;
+        line-height: 1.4;
+        text-align: center;
+        z-index: 2147483000;
+        pointer-events: none;
+        opacity: 0;
+        transition: opacity 140ms ease-in-out;
+      }
+      .lac-notice[data-visible="true"] { opacity: 1; }
+      .lac-settings { display: flex; flex-direction: column; gap: 18px; }
+      .lac-row { display: flex; align-items: flex-start; gap: 16px; justify-content: space-between; }
+      .lac-row-main { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+      .lac-label { font-size: 13px; font-weight: 600; color: var(--lumiverse-text, inherit); }
+      .lac-help { margin: 0; font-size: 12px; line-height: 1.45; color: var(--lumiverse-text-muted, inherit); }
+      .lac-control { flex: 0 0 auto; min-width: 96px; display: flex; justify-content: flex-end; }
+      .lac-block { display: flex; flex-direction: column; gap: 6px; }
+      .lac-policy, .lac-logbox {
+        padding: 12px 14px;
+        border: 1px solid var(--lumiverse-border, rgba(127,127,127,.4));
+        border-radius: var(--lumiverse-radius, 8px);
+        background: var(--lumiverse-fill-subtle, transparent);
+      }
+      .lac-policy-title { font-size: 13px; font-weight: 600; margin-bottom: 4px; }
+      .lac-log { margin: 8px 0 0; padding-left: 18px; font-size: 12px; line-height: 1.6; }
+      .lac-log li { color: var(--lumiverse-text-muted, inherit); }
+    `)
+    disposers.push(removeStyle)
+
+    // `inject` returns its own tracking wrapper, not the markup passed in, so
+    // the live region has to be queried back out of it before anything writes.
+    const noticeWrapper = ctx.dom.inject(
+      'body',
+      '<div class="lac-notice" role="status" aria-live="polite" aria-atomic="true"></div>',
+    )
+    notice = noticeWrapper.querySelector('.lac-notice') ?? noticeWrapper
+    disposers.push(() => {
+      if (noticeTimer !== null) window.clearTimeout(noticeTimer)
+      ctx.dom.uninject(noticeWrapper)
+    })
+  })
 
   /** Announce (screen reader + pill), log to the console, and keep the record. */
   function announce(chatId: string, text: string): void {
     if (destroyed) return
     console.info(`[lumi_autocontinue] ${text}`)
     record(chatId, text)
-    if (!config.announce) return
-    notice.textContent = text
-    notice.setAttribute('data-visible', 'true')
-    if (noticeTimer !== null) window.clearTimeout(noticeTimer)
-    noticeTimer = window.setTimeout(() => {
-      noticeTimer = null
-      notice.setAttribute('data-visible', 'false')
-      notice.textContent = ''
-    }, NOTICE_TTL_MS)
+    if (!config.announce || !notice) return
+    attempt('notice', () => {
+      const target = notice as Element
+      target.textContent = text
+      target.setAttribute('data-visible', 'true')
+      if (noticeTimer !== null) window.clearTimeout(noticeTimer)
+      noticeTimer = window.setTimeout(() => {
+        noticeTimer = null
+        target.setAttribute('data-visible', 'false')
+        target.textContent = ''
+      }, NOTICE_TTL_MS)
+    })
   }
 
   /**
@@ -249,43 +290,6 @@ export function setup(ctx: SpindleFrontendContext) {
   function skip(chatId: string, text: string): void {
     console.info(`[lumi_autocontinue] ${text}`)
     record(chatId, text)
-  }
-
-  disposers.push(() => {
-    if (noticeTimer !== null) window.clearTimeout(noticeTimer)
-    ctx.dom.uninject(noticeWrapper)
-  })
-
-  // ── Live settings ─────────────────────────────────────────────────────────
-  const settings = ctx.settings
-  if (settings) {
-    void settings
-      .get<Partial<Config>>(SETTINGS_KEY)
-      .then((stored) => {
-        if (!destroyed && stored !== undefined) config = normalizeConfig(stored)
-      })
-      .catch(() => {
-        /* keep defaults */
-      })
-    void settings
-      .get<Decision[]>(DECISIONS_KEY)
-      .then((stored) => {
-        if (destroyed || !Array.isArray(stored)) return
-        const restored = stored.filter(
-          (entry): entry is Decision =>
-            !!entry && typeof entry.at === 'number' && typeof entry.text === 'string',
-        )
-        // Anything recorded in this session is newer than what was stored.
-        decisions = [...decisions, ...restored].slice(0, MAX_DECISIONS)
-        renderLog?.()
-      })
-      .catch(() => {
-        /* no history is not an error */
-      })
-    const unwatch = settings.watch<Partial<Config>>(SETTINGS_KEY, (stored) => {
-      config = normalizeConfig(stored)
-    })
-    disposers.push(unwatch)
   }
 
   // ── Generation bookkeeping ────────────────────────────────────────────────
@@ -358,13 +362,13 @@ export function setup(ctx: SpindleFrontendContext) {
 
     if (!claimChat(chatId)) return skip(chatId, strings.skipped('another-window-claimed-it'))
 
-    const record_ = attempts.get(chatId) ?? { count: 0, messageId, at: Date.now() }
-    record_.count += 1
-    record_.messageId = messageId
-    record_.at = Date.now()
-    attempts.set(chatId, record_)
+    const spent = attempts.get(chatId) ?? { count: 0, messageId, at: Date.now() }
+    spent.count += 1
+    spent.messageId = messageId
+    spent.at = Date.now()
+    attempts.set(chatId, spent)
 
-    announce(chatId, strings.continuing(record_.count, config.maxAttempts))
+    announce(chatId, strings.continuing(spent.count, config.maxAttempts))
     try {
       await surfaces.invoke({ kind: 'command', id: CONTINUE_COMMAND })
     } catch (error) {
@@ -432,6 +436,8 @@ export function setup(ctx: SpindleFrontendContext) {
     scheduleContinue(chatId, messageId, delayMs)
   }
 
+  // ── Subscriptions ─────────────────────────────────────────────────────────
+  // First, before anything optional. This is the feature; the rest is comfort.
   disposers.push(
     ctx.events.on('GENERATION_STARTED', (raw) => {
       const payload = (raw ?? {}) as GenerationEndedLike
@@ -463,36 +469,72 @@ export function setup(ctx: SpindleFrontendContext) {
     }),
   )
 
-  // ── Settings panel ────────────────────────────────────────────────────────
-  if (settings && ctx.ui.registerSettingsTab) {
-    const tab = ctx.ui.registerSettingsTab({
-      id: 'lumi_autocontinue',
-      title: strings.settingsTitle,
-      shortName: strings.settingsShort,
-      description: strings.settingsDescription,
-      keywords: ['continue', 'continuar', 'reconnect', 'conexao', 'retry', 'autocontinue'],
-      position: 'bottom',
-    })
-    disposers.push(() => tab.destroy())
-    const panel = buildSettingsPanel(
-      ctx,
-      tab.root,
-      strings,
-      () => config,
-      (patch) => {
-        config = normalizeConfig({ ...config, ...patch })
-        void settings.set(SETTINGS_KEY, config).catch(() => {
-          /* a failed write leaves the in-memory value in charge */
+  // ── Stored settings (optional) ────────────────────────────────────────────
+  const settings = ctx.settings
+  if (settings) {
+    attempt('settings', () => {
+      void settings
+        .get<Partial<Config>>(SETTINGS_KEY)
+        .then((stored) => {
+          if (!destroyed && stored !== undefined) config = normalizeConfig(stored)
         })
-      },
-      () => decisions,
-      ctx.manifest?.version ?? 'unknown',
-    )
-    renderLog = panel.renderLog
-    renderLog()
-    disposers.push(tab.onActivate(() => renderLog?.()))
-    disposers.push(() => {
-      renderLog = null
+        .catch((error) => {
+          console.warn('[lumi_autocontinue] could not read stored settings', error)
+        })
+      void settings
+        .get<Decision[]>(DECISIONS_KEY)
+        .then((stored) => {
+          if (destroyed || !Array.isArray(stored)) return
+          const restored = stored.filter(
+            (entry): entry is Decision =>
+              !!entry && typeof entry.at === 'number' && typeof entry.text === 'string',
+          )
+          // Anything recorded in this session is newer than what was stored.
+          decisions = [...decisions, ...restored].slice(0, MAX_DECISIONS)
+          renderLog?.()
+        })
+        .catch(() => {
+          /* no history is not an error */
+        })
+      const unwatch = settings.watch<Partial<Config>>(SETTINGS_KEY, (stored) => {
+        config = normalizeConfig(stored)
+      })
+      disposers.push(unwatch)
+    })
+  }
+
+  // ── Settings panel (optional) ─────────────────────────────────────────────
+  if (settings && ctx.ui.registerSettingsTab) {
+    attempt('settings panel', () => {
+      const tab = ctx.ui.registerSettingsTab!({
+        id: 'lumi_autocontinue',
+        title: strings.settingsTitle,
+        shortName: strings.settingsShort,
+        description: strings.settingsDescription,
+        keywords: ['continue', 'continuar', 'reconnect', 'conexao', 'retry', 'autocontinue'],
+        position: 'bottom',
+      })
+      disposers.push(() => tab.destroy())
+      const panel = buildSettingsPanel(
+        ctx,
+        tab.root,
+        strings,
+        () => config,
+        (patch) => {
+          config = normalizeConfig({ ...config, ...patch })
+          void settings.set(SETTINGS_KEY, config).catch((error) => {
+            console.warn('[lumi_autocontinue] could not save settings', error)
+          })
+        },
+        () => decisions,
+        ctx.manifest?.version ?? 'unknown',
+      )
+      renderLog = panel.renderLog
+      renderLog()
+      disposers.push(tab.onActivate(() => renderLog?.()))
+      disposers.push(() => {
+        renderLog = null
+      })
     })
   }
 
@@ -504,16 +546,18 @@ export function setup(ctx: SpindleFrontendContext) {
   console.info(`[lumi_autocontinue] ${runningVersion} watching for dropped connections`)
   // A failed status write is itself a finding: it means the decision log will
   // not survive either, so it is reported rather than swallowed.
-  void ctx.settings
-    ?.set(STATUS_KEY, {
-      version: runningVersion,
-      startedAt: Date.now(),
-      hasCommandSurfaces: !!ctx.host.surfaces,
-      document: DOCUMENT_TOKEN,
-    })
-    .catch((error) => {
-      console.warn('[lumi_autocontinue] could not persist the status beacon', error)
-    })
+  attempt('status beacon', () => {
+    void ctx.settings
+      ?.set(STATUS_KEY, {
+        version: runningVersion,
+        startedAt: Date.now(),
+        hasCommandSurfaces: !!ctx.host.surfaces,
+        document: DOCUMENT_TOKEN,
+      })
+      .catch((error) => {
+        console.warn('[lumi_autocontinue] could not persist the status beacon', error)
+      })
+  })
 
   return () => {
     destroyed = true

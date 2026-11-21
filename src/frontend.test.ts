@@ -45,7 +45,26 @@ class FakeElement {
 
 type Timer = { id: number; fn: () => void; delay: number }
 
-function makeHarness(activeChatId: string | null = 'chat-1') {
+/**
+ * The host's own rule for an extension-private settings key, copied from
+ * `frontend/src/lib/spindle/settings-bridge.ts`: `module:name`, two segments,
+ * the module matching /^[a-z][a-z0-9_]*$/. `watch()` enforces it
+ * synchronously, which is how a one-segment key took the whole extension down
+ * at load in 1.0.0 through 1.0.2. The fake host enforces it too, so the same
+ * mistake fails here instead of in production.
+ */
+function assertHostSettingKey(key: string): void {
+  const segments = key.split(':')
+  if (key.startsWith('spindle:')) throw new Error('SETTING_NAMESPACE_INVALID')
+  if (segments.length !== 2 || segments.some((segment) => !/^[A-Za-z0-9._-]+$/.test(segment))) {
+    throw new Error(`SETTING_KEY_INVALID:${key}`)
+  }
+  if (!/^[a-z][a-z0-9_]*$/.test(segments[0] ?? '')) {
+    throw new Error(`SETTING_MODULE_INVALID:${segments[0] ?? ''}`)
+  }
+}
+
+function makeHarness(activeChatId: string | null = 'chat-1', options: { brokenSettings?: boolean } = {}) {
   const handlers = new Map<string, Array<(payload: unknown) => void>>()
   const timers: Timer[] = []
   const invoked: Array<{ kind: string; id: string }> = []
@@ -114,10 +133,22 @@ function makeHarness(activeChatId: string | null = 'chat-1') {
       }),
     },
     settings: {
-      get: async () => undefined,
-      set: async () => {},
+      get: async (key: string) => {
+        if (options.brokenSettings) throw new Error('SETTINGS_UNAVAILABLE')
+        assertHostSettingKey(key)
+        return undefined
+      },
+      set: async (key: string) => {
+        if (options.brokenSettings) throw new Error('SETTINGS_UNAVAILABLE')
+        assertHostSettingKey(key)
+      },
       remove: async () => {},
-      watch: () => () => {},
+      // Synchronous, exactly like the host's.
+      watch: (key: string) => {
+        if (options.brokenSettings) throw new Error('SETTINGS_UNAVAILABLE')
+        assertHostSettingKey(key)
+        return () => {}
+      },
     },
     events: {
       on: (event: string, handler: (payload: unknown) => void) => {
@@ -303,6 +334,26 @@ test('the attempt ceiling stops the loop', () => {
   harness.runTimers()
 
   expect(harness.invoked.length).toBe(2)
+})
+
+test('every settings key the extension uses is valid for the host', () => {
+  const { SETTINGS_KEY, DECISIONS_KEY, STATUS_KEY } = require('./frontend') as typeof import('./frontend')
+  for (const key of [SETTINGS_KEY, DECISIONS_KEY, STATUS_KEY]) {
+    expect(() => assertHostSettingKey(key), `rejected by the host: ${key}`).not.toThrow()
+  }
+})
+
+test('a settings API that fails on everything does not disable the extension', () => {
+  const harness = makeHarness('chat-1', { brokenSettings: true })
+  teardown = setupExtension(harness.ctx)
+
+  // The subscriptions are what the feature is. They must survive a broken
+  // optional subsystem - this is the 1.0.0-to-1.0.2 regression.
+  expect(harness.handlers.get('GENERATION_ENDED')?.length ?? 0).toBe(1)
+
+  harness.emit('GENERATION_ENDED', timedOut)
+  harness.runTimers()
+  expect(harness.invoked.length, 'the continue must still fire').toBe(1)
 })
 
 /**
