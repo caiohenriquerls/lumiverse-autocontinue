@@ -1,0 +1,12 @@
+{
+  "version": "1.0.0",
+  "name": "Auto-Continue on Connection Loss",
+  "identifier": "lumi_autocontinue",
+  "author": "caiohenriquerls",
+  "github": "https://github.com/caiohenriquerls/lumiverse-autocontinue",
+  "homepage": "https://github.com/caiohenriquerls/lumiverse-autocontinue",
+  "description": "Re-fires Continue when a reply dies from a dropped connection. Never fires for billing, credential, policy or malformed-request failures.",
+  "permissions": ["generation"],
+  "entry_frontend": "dist/frontend.js",
+  "minimum_lumiverse_version": "1.3.0"
+}

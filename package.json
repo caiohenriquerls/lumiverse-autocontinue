@@ -1,0 +1,19 @@
+{
+  "name": "lumiverse-autocontinue",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Lumiverse Spindle extension that re-fires Continue when a reply dies from a dropped connection, and never for billing, credential or policy failures.",
+  "license": "MIT",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "bun test",
+    "build": "bun build src/frontend.ts --outfile dist/frontend.js --target browser",
+    "check": "bun run typecheck && bun test && bun run build"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.2.0",
+    "lumiverse-spindle-types": "0.6.80",
+    "typescript": "^5.5.0"
+  }
+}
