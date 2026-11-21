@@ -209,7 +209,7 @@ var EN = {
   enabledLabel: "Auto-continue after a dropped connection",
   enabledHelp: "When a reply stops mid-stream because the connection to the provider broke, send Continue by itself so the message picks up where it stopped.",
   attemptsLabel: "Maximum attempts per message",
-  attemptsHelp: "After this many automatic continues on the same reply, it stops and leaves the message to you.",
+  attemptsHelp: "After this many automatic continues on the same reply, it stops and leaves the message to you. 1 to 10. A provider that stalls on a long prompt often clears on the third or fourth try, and an automatic attempt costs the same tokens as pressing Continue yourself.",
   delayLabel: "Wait before continuing (seconds)",
   delayHelp: "The pause doubles on each further attempt. Rate-limit failures always wait at least 20 seconds.",
   truncatedLabel: "Also continue a reply cut off by the token limit",
@@ -240,7 +240,7 @@ var PT = {
   enabledLabel: "Continuar sozinho depois de queda de conexão",
   enabledHelp: "Quando a resposta para no meio porque a conexão com o provedor caiu, manda o Continue por conta própria para a mensagem seguir de onde parou.",
   attemptsLabel: "Máximo de tentativas por mensagem",
-  attemptsHelp: "Depois dessa quantidade de continues automáticos na mesma resposta, ele desiste e deixa a mensagem para você.",
+  attemptsHelp: "Depois dessa quantidade de continues automáticos na mesma resposta, ele desiste e deixa a mensagem para você. De 1 a 10. Provedor que engasga em prompt longo costuma destravar na terceira ou quarta tentativa, e a tentativa automática gasta os mesmos tokens que você gastaria apertando Continue na mão.",
   delayLabel: "Esperar antes de continuar (segundos)",
   delayHelp: "A pausa dobra em cada tentativa seguinte. Erro de limite de uso espera no mínimo 20 segundos.",
   truncatedLabel: "Continuar também quando o limite de tokens cortar a resposta",
@@ -282,13 +282,13 @@ var CLAIM_PREFIX = "spindle:lumi_autocontinue:claim:";
 var CLAIM_TTL_MS = 15000;
 var SLOW_FLOOR_MS = 20000;
 var MAX_DELAY_MS = 120000;
-var ATTEMPT_RESET_MS = 10 * 60000;
+var ATTEMPT_RESET_MS = 60 * 60000;
 var RUNNING_TTL_MS = 15 * 60000;
 var NOTICE_TTL_MS = 7000;
 var MAX_DECISIONS = 20;
 var DEFAULTS = {
   enabled: true,
-  maxAttempts: 2,
+  maxAttempts: 4,
   delaySeconds: 3,
   continueOnTruncated: false,
   announce: true,
@@ -307,7 +307,7 @@ function normalizeConfig(raw) {
   const input = raw && typeof raw === "object" ? raw : {};
   return {
     enabled: typeof input.enabled === "boolean" ? input.enabled : DEFAULTS.enabled,
-    maxAttempts: clamp(input.maxAttempts, 1, 5, DEFAULTS.maxAttempts),
+    maxAttempts: clamp(input.maxAttempts, 1, 10, DEFAULTS.maxAttempts),
     delaySeconds: clamp(input.delaySeconds, 1, 120, DEFAULTS.delaySeconds),
     continueOnTruncated: typeof input.continueOnTruncated === "boolean" ? input.continueOnTruncated : DEFAULTS.continueOnTruncated,
     announce: typeof input.announce === "boolean" ? input.announce : DEFAULTS.announce,
@@ -496,7 +496,7 @@ function setup(ctx) {
       return skip(chatId, strings.skipped("another-window-claimed-it"));
     const spent = attempts.get(chatId) ?? { count: 0, messageId, at: Date.now() };
     spent.count += 1;
-    spent.messageId = messageId;
+    spent.messageId = messageId ?? spent.messageId;
     spent.at = Date.now();
     attempts.set(chatId, spent);
     announce(chatId, strings.continuing(spent.count, config.maxAttempts));
@@ -528,9 +528,10 @@ function setup(ctx) {
     if (generationType !== "normal" && generationType !== "continue") {
       return skip(chatId, strings.skipped(`generation-type:${generationType}`));
     }
-    const content = str(payload.content);
-    if (!content || !content.trim())
+    const produced = str(payload.content)?.trim();
+    if (!produced && generationType !== "continue") {
       return skip(chatId, strings.skipped("no-partial-text"));
+    }
     if (ctx.getActiveChat().chatId !== chatId)
       return skip(chatId, strings.skipped("other-chat"));
     if (isRunning(chatId))
@@ -540,7 +541,8 @@ function setup(ctx) {
       return skip(chatId, strings.declined(verdict.reason));
     const messageId = str(payload.messageId);
     let spentRecord = attempts.get(chatId);
-    if (spentRecord && (spentRecord.messageId !== messageId || Date.now() - spentRecord.at > ATTEMPT_RESET_MS)) {
+    const movedOn = !!messageId && !!spentRecord?.messageId && spentRecord.messageId !== messageId;
+    if (spentRecord && (movedOn || Date.now() - spentRecord.at > ATTEMPT_RESET_MS)) {
       spentRecord = undefined;
       attempts.delete(chatId);
     }
@@ -674,7 +676,7 @@ function buildSettingsPanel(ctx, root, strings, read, write, readDecisions, runn
     value: current.maxAttempts,
     integer: true,
     min: 1,
-    max: 5,
+    max: 10,
     step: 1,
     ariaLabel: strings.attemptsLabel,
     onChange: (value) => write({ maxAttempts: value ?? DEFAULTS.maxAttempts })

@@ -56,7 +56,13 @@ const CLAIM_TTL_MS = 15_000
 const SLOW_FLOOR_MS = 20_000
 const MAX_DELAY_MS = 120_000
 /** A new failure this long after the last one starts the attempt count over. */
-const ATTEMPT_RESET_MS = 10 * 60_000
+/**
+ * Measured from when an attempt fired, so it has to outlast a whole
+ * generation. On a big chat one reply can stream for ten minutes or more, and
+ * a window shorter than that would reset the counter between attempts and turn
+ * the ceiling into no ceiling at all.
+ */
+const ATTEMPT_RESET_MS = 60 * 60_000
 /**
  * A generation whose start we saw this long ago is treated as finished even if
  * no terminal event arrived. Without this, one lost GENERATION_ENDED would
@@ -77,7 +83,10 @@ type Config = {
 
 const DEFAULTS: Config = {
   enabled: true,
-  maxAttempts: 2,
+  // A provider that stalls on a long prompt often clears on the third or
+  // fourth try, and the token cost of an automatic attempt is the same as the
+  // one the user would pay pressing Continue by hand - only the waiting moves.
+  maxAttempts: 4,
   delaySeconds: 3,
   continueOnTruncated: false,
   announce: true,
@@ -114,7 +123,7 @@ function normalizeConfig(raw: unknown): Config {
   const input = (raw && typeof raw === 'object' ? raw : {}) as Partial<Config>
   return {
     enabled: typeof input.enabled === 'boolean' ? input.enabled : DEFAULTS.enabled,
-    maxAttempts: clamp(input.maxAttempts, 1, 5, DEFAULTS.maxAttempts),
+    maxAttempts: clamp(input.maxAttempts, 1, 10, DEFAULTS.maxAttempts),
     delaySeconds: clamp(input.delaySeconds, 1, 120, DEFAULTS.delaySeconds),
     continueOnTruncated:
       typeof input.continueOnTruncated === 'boolean' ? input.continueOnTruncated : DEFAULTS.continueOnTruncated,
@@ -364,7 +373,8 @@ export function setup(ctx: SpindleFrontendContext) {
 
     const spent = attempts.get(chatId) ?? { count: 0, messageId, at: Date.now() }
     spent.count += 1
-    spent.messageId = messageId
+    // Keep the anchor when this attempt had no message of its own to report.
+    spent.messageId = messageId ?? spent.messageId
     spent.at = Date.now()
     attempts.set(chatId, spent)
 
@@ -404,10 +414,23 @@ export function setup(ctx: SpindleFrontendContext) {
       return skip(chatId, strings.skipped(`generation-type:${generationType}`))
     }
 
-    // Nothing arrived before the socket died: there is no partial reply to
-    // extend, and continuing an empty message is not what the user wants.
-    const content = str(payload.content)
-    if (!content || !content.trim()) return skip(chatId, strings.skipped('no-partial-text'))
+    // Did this generation leave any text behind?
+    //
+    // For a `continue` the answer does not matter, and getting that wrong is
+    // what made 1.0.3 give up exactly when persistence was about to pay off:
+    // a continue that dies before its first token persists nothing, so the
+    // event carries no content and no messageId - while the reply it was
+    // extending still sits in the chat with everything that arrived earlier.
+    // The host only runs a `continue` after resolving a continuable assistant
+    // message, so the type alone is proof there is text to extend.
+    //
+    // For a `normal` generation it does matter: no text means the staged
+    // message is empty (and usually already cleaned up by the host), so the
+    // tail is a user message and there is nothing for Continue to extend.
+    const produced = str(payload.content)?.trim()
+    if (!produced && generationType !== 'continue') {
+      return skip(chatId, strings.skipped('no-partial-text'))
+    }
 
     if (ctx.getActiveChat().chatId !== chatId) return skip(chatId, strings.skipped('other-chat'))
     if (isRunning(chatId)) return skip(chatId, strings.skipped('already-generating'))
@@ -423,7 +446,12 @@ export function setup(ctx: SpindleFrontendContext) {
 
     const messageId = str(payload.messageId)
     let spentRecord = attempts.get(chatId)
-    if (spentRecord && (spentRecord.messageId !== messageId || Date.now() - spentRecord.at > ATTEMPT_RESET_MS)) {
+    // Only a *known* different message starts the count over. A failed
+    // continue reports no messageId at all, and treating that absence as "a
+    // new reply" would reset the counter on every attempt - the ceiling would
+    // stop existing and the retries would never end.
+    const movedOn = !!messageId && !!spentRecord?.messageId && spentRecord.messageId !== messageId
+    if (spentRecord && (movedOn || Date.now() - spentRecord.at > ATTEMPT_RESET_MS)) {
       spentRecord = undefined
       attempts.delete(chatId)
     }
@@ -613,7 +641,7 @@ function buildSettingsPanel(
     value: current.maxAttempts,
     integer: true,
     min: 1,
-    max: 5,
+    max: 10,
     step: 1,
     ariaLabel: strings.attemptsLabel,
     onChange: (value) => write({ maxAttempts: value ?? DEFAULTS.maxAttempts }),

@@ -57,8 +57,13 @@ checked before every built-in rule.
 
 ## Safety rails
 
-- **There has to be partial text.** With nothing generated there is nothing to
-  continue, and it does not fire. (Retrying from scratch is a different action.)
+- **There has to be something to continue.** A `normal` generation that
+  produced no text leaves nothing to extend, so it does not fire; retrying from
+  scratch is a different action. A failed `continue` is different: it persists
+  nothing, so the event carries no content and no message id, while the reply
+  it was extending still holds everything that arrived earlier. Those are
+  retried — getting this backwards is what made 1.0.3 give up on the attempt
+  that mattered.
 - **Only `normal` and `continue` generations.** A swipe or background swipe
   writes into a slot that may not be the selected one, and Continue would
   extend the wrong text. Impersonate and quiet generations are skipped too.
@@ -73,10 +78,12 @@ checked before every built-in rule.
   soon as anything starts generating in that chat — including you.
 - **Stop is your decision.** A `GENERATION_STOPPED` cancels the wait and clears
   the counter.
-- **Attempt ceiling.** Two automatic continues per message by default, with the
-  pause doubling each time (3s, 6s, …, capped at 120s). When the ceiling is hit
-  it announces and stops. The counter resets on a clean finish, on a different
-  message, or after 10 minutes without a new failure.
+- **Attempt ceiling.** Four automatic continues per reply by default (1 to 10),
+  with the pause doubling each time (3s, 6s, 12s, …, capped at 120s). When the
+  ceiling is hit it announces and stops. The counter resets on a clean finish
+  or on a different reply, and only a *known* different message resets it — a
+  continue that dies before its first token reports no message at all, and
+  reading that as a new reply would remove the ceiling entirely.
 
 ## How it works
 
@@ -185,8 +192,13 @@ Fixed along the way, while the extension was never actually running:
 - A chat whose generation never reported a terminal event stayed "busy"
   forever, disabling the extension there with no trace.
 
+Field evidence since then (1.0.4): the extension fired, retried, and stopped
+where it should — and then a manual Continue on the same chat succeeded where
+its two automatic attempts had timed out. Persistence works; the ceiling was
+just too low and one guard asked the wrong question. Both are fixed above.
+
 The error policy is unit-tested against 34 payloads shaped like real provider
-failures, and the guard chain has 13 tests driving real payloads through
+failures, and the guard chain has 16 tests driving real payloads through
 `setup()` with a fake host (`bun test`). The path has still not been watched
 end to end against a live provider drop, so report anything odd.
 

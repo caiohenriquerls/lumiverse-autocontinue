@@ -42,7 +42,7 @@ const EN: Strings = {
   enabledHelp:
     'When a reply stops mid-stream because the connection to the provider broke, send Continue by itself so the message picks up where it stopped.',
   attemptsLabel: 'Maximum attempts per message',
-  attemptsHelp: 'After this many automatic continues on the same reply, it stops and leaves the message to you.',
+  attemptsHelp: 'After this many automatic continues on the same reply, it stops and leaves the message to you. 1 to 10. A provider that stalls on a long prompt often clears on the third or fourth try, and an automatic attempt costs the same tokens as pressing Continue yourself.',
   delayLabel: 'Wait before continuing (seconds)',
   delayHelp: 'The pause doubles on each further attempt. Rate-limit failures always wait at least 20 seconds.',
   truncatedLabel: 'Also continue a reply cut off by the token limit',
@@ -76,7 +76,7 @@ const PT: Strings = {
   enabledHelp:
     'Quando a resposta para no meio porque a conexão com o provedor caiu, manda o Continue por conta própria para a mensagem seguir de onde parou.',
   attemptsLabel: 'Máximo de tentativas por mensagem',
-  attemptsHelp: 'Depois dessa quantidade de continues automáticos na mesma resposta, ele desiste e deixa a mensagem para você.',
+  attemptsHelp: 'Depois dessa quantidade de continues automáticos na mesma resposta, ele desiste e deixa a mensagem para você. De 1 a 10. Provedor que engasga em prompt longo costuma destravar na terceira ou quarta tentativa, e a tentativa automática gasta os mesmos tokens que você gastaria apertando Continue na mão.',
   delayLabel: 'Esperar antes de continuar (segundos)',
   delayHelp: 'A pausa dobra em cada tentativa seguinte. Erro de limite de uso espera no mínimo 20 segundos.',
   truncatedLabel: 'Continuar também quando o limite de tokens cortar a resposta',

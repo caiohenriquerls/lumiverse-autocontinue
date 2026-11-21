@@ -60,8 +60,13 @@ são checadas antes de qualquer regra interna.
 
 ## Travas de segurança
 
-- **Precisa ter texto parcial.** Sem nada gerado não há o que continuar, e ela
-  não dispara. (Tentar do zero seria outra ação.)
+- **Precisa ter o que continuar.** Geração `normal` que não produziu texto não
+  deixa nada para estender, então ela não dispara; tentar do zero seria outra
+  ação. Um `continue` que falhou é diferente: ele não persiste nada, então o
+  evento vem sem conteúdo e sem id de mensagem, enquanto a resposta que ele
+  estendia continua no chat com tudo que chegou antes. Esses são repetidos —
+  inverter isso foi o que fez a 1.0.3 desistir justo na tentativa que
+  importava.
 - **Só geração `normal` e `continue`.** Swipe e background swipe escrevem num
   slot que pode não ser o selecionado, e o Continue estenderia o texto errado.
   Impersonate e quiet também ficam fora.
@@ -76,10 +81,12 @@ são checadas antes de qualquer regra interna.
   qualquer geração começa nesse chat — inclusive uma sua.
 - **Stop é decisão sua.** Um `GENERATION_STOPPED` cancela a espera e zera o
   contador.
-- **Teto de tentativas.** Dois continues automáticos por mensagem no padrão,
-  com a pausa dobrando a cada tentativa (3s, 6s, …, teto de 120s). Esgotado o
-  teto, ela anuncia e para. O contador zera num sucesso limpo, numa mensagem
-  diferente, ou depois de 10 minutos sem falha nova.
+- **Teto de tentativas.** Quatro continues automáticos por resposta no padrão
+  (de 1 a 10), com a pausa dobrando a cada tentativa (3s, 6s, 12s, …, teto de
+  120s). Esgotado o teto, ela anuncia e para. O contador zera num sucesso limpo
+  ou numa resposta diferente, e só uma mensagem *conhecida* e diferente zera —
+  um continue que morre antes do primeiro token não reporta mensagem nenhuma, e
+  ler essa ausência como resposta nova acabaria com o teto.
 
 ## Como funciona
 
@@ -193,8 +200,14 @@ Corrigido no caminho, enquanto a extensão nunca estava de fato rodando:
 - Um chat cuja geração nunca reportou evento terminal ficava "ocupado" para
   sempre, desligando a extensão ali sem deixar rastro.
 
+Evidência de campo depois disso (1.0.4): a extensão disparou, repetiu e parou
+onde devia — e aí um Continue manual no mesmo chat funcionou, onde as duas
+tentativas automáticas dela tinham estourado. Insistir funciona; o teto só
+estava baixo e uma trava fazia a pergunta errada. Os dois estão corrigidos
+acima.
+
 A política de erros tem teste de unidade contra 34 payloads no formato das
-falhas reais de provedor, e a cadeia de travas tem 13 testes jogando payloads
+falhas reais de provedor, e a cadeia de travas tem 16 testes jogando payloads
 reais dentro do `setup()` com um host falso (`bun test`). O caminho ainda não
 foi observado de ponta a ponta contra uma queda ao vivo, então relate qualquer
 coisa estranha.

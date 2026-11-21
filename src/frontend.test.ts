@@ -325,15 +325,65 @@ test('the attempt ceiling stops the loop', () => {
   const harness = makeHarness()
   teardown = setupExtension(harness.ctx)
 
-  // Default ceiling is 2 attempts on the same message.
-  harness.emit('GENERATION_ENDED', timedOut)
-  harness.runTimers()
-  harness.emit('GENERATION_ENDED', timedOut)
-  harness.runTimers()
-  harness.emit('GENERATION_ENDED', timedOut)
+  // Default ceiling is 4 attempts on the same reply.
+  for (let round = 0; round < 6; round++) {
+    harness.emit('GENERATION_ENDED', timedOut)
+    harness.runTimers()
+  }
+
+  expect(harness.invoked.length).toBe(4)
+})
+
+/**
+ * A continue that dies before its first token persists nothing, so the event
+ * carries neither content nor messageId - while the reply it was extending
+ * still holds everything that arrived earlier. 1.0.3 read that as "nothing to
+ * continue" and gave up on the attempt that mattered.
+ */
+const continueDiedEmpty = {
+  chatId: 'chat-1',
+  generationId: 'gen-2',
+  content: '',
+  error: 'The operation timed out.',
+  errorCode: 'generation_failed',
+  generationType: 'continue',
+}
+
+test('a continue that produced nothing is still retried', () => {
+  const harness = makeHarness()
+  teardown = setupExtension(harness.ctx)
+
+  harness.emit('GENERATION_ENDED', continueDiedEmpty)
   harness.runTimers()
 
-  expect(harness.invoked.length).toBe(2)
+  expect(harness.invoked.length, 'an empty continue must not end the chain').toBe(1)
+})
+
+test('a normal generation that produced nothing is left alone', () => {
+  const harness = makeHarness()
+  teardown = setupExtension(harness.ctx)
+
+  harness.emit('GENERATION_ENDED', { ...continueDiedEmpty, generationType: 'normal' })
+  harness.runTimers()
+
+  expect(harness.invoked).toEqual([])
+})
+
+test('empty continues cannot loop past the ceiling', () => {
+  const harness = makeHarness()
+  teardown = setupExtension(harness.ctx)
+
+  // The first failure anchors the counter on a real message, then every
+  // retry comes back with no messageId at all. Treating that absence as a
+  // new reply would reset the count and retry forever.
+  harness.emit('GENERATION_ENDED', timedOut)
+  harness.runTimers()
+  for (let round = 0; round < 8; round++) {
+    harness.emit('GENERATION_ENDED', continueDiedEmpty)
+    harness.runTimers()
+  }
+
+  expect(harness.invoked.length).toBe(4)
 })
 
 test('every settings key the extension uses is valid for the host', () => {
