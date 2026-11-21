@@ -1,6 +1,6 @@
 {
   "name": "lumiverse-autocontinue",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "private": true,
   "type": "module",
   "description": "Lumiverse Spindle extension that re-fires Continue when a reply dies from a dropped connection, and never for billing, credential or policy failures.",

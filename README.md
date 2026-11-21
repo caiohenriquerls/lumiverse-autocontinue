@@ -143,6 +143,14 @@ stopped it (`Did not continue, guard: other-chat`). An empty log after a failed
 reply means the extension is not running in that page at all — check that it is
 enabled and that `generation` is granted.
 
+**Reload after updating.** The same panel shows which version is live in the
+page, and it can lag the version on the extension card: a loaded page keeps the
+module it already imported. After **Update**, reload the page (or restart the
+desktop app) before expecting the new behaviour. Each `setup()` also writes a
+`status` beacon (version, start time, whether the host exposed its command
+surfaces) to the extension's settings, so which build is live is answerable
+without opening developer tools.
+
 ## Status
 
 1.0.1 is the version worth running. 1.0.0 had two defects that could make it do

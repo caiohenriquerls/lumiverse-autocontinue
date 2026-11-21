@@ -25,6 +25,7 @@ export type Strings = {
   readonly logTitle: string
   readonly logHelp: string
   readonly logEmpty: string
+  readonly runningVersion: (version: string) => string
   readonly declined: (reason: string) => string
   readonly skipped: (guard: string) => string
   readonly waiting: (seconds: number) => string
@@ -58,6 +59,7 @@ const EN: Strings = {
   logTitle: 'Recent decisions',
   logHelp: 'Newest first. Every failure it could have continued leaves a line here, including the ones it chose not to continue.',
   logEmpty: 'Nothing recorded yet — no generation has failed since this page loaded.',
+  runningVersion: (version) => `Running version ${version} in this page. The extension card can be newer until you reload.`,
   declined: (reason) => `Did not continue: ${reason}.`,
   skipped: (guard) => `Did not continue, guard: ${guard}.`,
   waiting: (seconds) => `Connection lost. Continuing in ${seconds}s...`,
@@ -91,6 +93,7 @@ const PT: Strings = {
   logTitle: 'Decisões recentes',
   logHelp: 'Mais recente primeiro. Toda falha que ele poderia ter continuado deixa uma linha aqui, inclusive as que ele escolheu não continuar.',
   logEmpty: 'Nada registrado ainda — nenhuma geração falhou desde que esta página carregou.',
+  runningVersion: (version) => `Rodando a versão ${version} nesta página. O card da extensão pode estar mais novo até você recarregar.`,
   declined: (reason) => `Não continuei: ${reason}.`,
   skipped: (guard) => `Não continuei, trava: ${guard}.`,
   waiting: (seconds) => `Conexão caiu. Continuando em ${seconds}s...`,

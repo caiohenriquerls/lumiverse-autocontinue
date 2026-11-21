@@ -28,6 +28,14 @@ import { pickStrings, type Strings } from './strings'
 
 const SETTINGS_KEY = 'config'
 const DECISIONS_KEY = 'decisions'
+/**
+ * Written once per `setup()`. It is how anyone - including the author, reading
+ * the database from outside the browser - can tell which build is actually
+ * live in the page, which is a different question from which version the
+ * Extensions panel shows: updating an extension does not always replace the
+ * module a loaded page is already running.
+ */
+const STATUS_KEY = 'status'
 const CONTINUE_COMMAND = 'action-continue'
 const CLAIM_PREFIX = 'spindle:lumi_autocontinue:claim:'
 /** How long one document's claim on a chat blocks the other documents. */
@@ -478,6 +486,7 @@ export function setup(ctx: SpindleFrontendContext) {
         })
       },
       () => decisions,
+      ctx.manifest?.version ?? 'unknown',
     )
     renderLog = panel.renderLog
     renderLog()
@@ -490,7 +499,21 @@ export function setup(ctx: SpindleFrontendContext) {
   if (!ctx.host.surfaces) {
     console.warn('[lumi_autocontinue] this host exposes no command surfaces; the extension cannot continue anything')
   }
-  console.info('[lumi_autocontinue] watching for dropped connections')
+
+  const runningVersion = ctx.manifest?.version ?? 'unknown'
+  console.info(`[lumi_autocontinue] ${runningVersion} watching for dropped connections`)
+  // A failed status write is itself a finding: it means the decision log will
+  // not survive either, so it is reported rather than swallowed.
+  void ctx.settings
+    ?.set(STATUS_KEY, {
+      version: runningVersion,
+      startedAt: Date.now(),
+      hasCommandSurfaces: !!ctx.host.surfaces,
+      document: DOCUMENT_TOKEN,
+    })
+    .catch((error) => {
+      console.warn('[lumi_autocontinue] could not persist the status beacon', error)
+    })
 
   return () => {
     destroyed = true
@@ -513,6 +536,7 @@ function buildSettingsPanel(
   read: () => Config,
   write: (patch: Partial<Config>) => void,
   readDecisions: () => readonly Decision[],
+  runningVersion: string,
 ): { renderLog: () => void } {
   const panel = ctx.dom.createElement('div', { class: 'lac-settings' })
   root.appendChild(panel)
@@ -599,9 +623,14 @@ function buildSettingsPanel(
   logTitle.textContent = strings.logTitle
   const logHelp = ctx.dom.createElement('p', { class: 'lac-help' })
   logHelp.textContent = strings.logHelp
+  // The version of the code actually running in this page, which can lag the
+  // version on the extension card until the page is reloaded.
+  const logVersion = ctx.dom.createElement('p', { class: 'lac-help' })
+  logVersion.textContent = strings.runningVersion(runningVersion)
   const logList = ctx.dom.createElement('ul', { class: 'lac-log' })
   logBox.appendChild(logTitle)
   logBox.appendChild(logHelp)
+  logBox.appendChild(logVersion)
   logBox.appendChild(logList)
   panel.appendChild(logBox)
 

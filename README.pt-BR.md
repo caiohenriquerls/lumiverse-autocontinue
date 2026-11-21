@@ -149,6 +149,14 @@ trava que barrou (`Não continuei, trava: other-chat`). Log vazio depois de uma
 resposta que falhou significa que a extensão não está rodando naquela página —
 confira se ela está habilitada e se a permissão `generation` foi concedida.
 
+**Recarregue depois de atualizar.** O mesmo painel mostra qual versão está viva
+na página, e ela pode estar atrás da versão do card: uma página já carregada
+continua com o módulo que importou. Depois do **Update**, recarregue a página
+(ou reinicie o app desktop) antes de esperar o comportamento novo. Cada
+`setup()` também grava um farol de `status` (versão, hora de início, se o host
+expôs os comandos dele) nas configurações da extensão, então dá para responder
+qual build está viva sem abrir as ferramentas de desenvolvedor.
+
 ## Situação
 
 A 1.0.1 é a versão que vale rodar. A 1.0.0 tinha dois defeitos capazes de fazer

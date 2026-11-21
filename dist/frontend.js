@@ -225,6 +225,7 @@ my gateway`,
   logTitle: "Recent decisions",
   logHelp: "Newest first. Every failure it could have continued leaves a line here, including the ones it chose not to continue.",
   logEmpty: "Nothing recorded yet — no generation has failed since this page loaded.",
+  runningVersion: (version) => `Running version ${version} in this page. The extension card can be newer until you reload.`,
   declined: (reason) => `Did not continue: ${reason}.`,
   skipped: (guard) => `Did not continue, guard: ${guard}.`,
   waiting: (seconds) => `Connection lost. Continuing in ${seconds}s...`,
@@ -255,6 +256,7 @@ meu gateway`,
   logTitle: "Decisões recentes",
   logHelp: "Mais recente primeiro. Toda falha que ele poderia ter continuado deixa uma linha aqui, inclusive as que ele escolheu não continuar.",
   logEmpty: "Nada registrado ainda — nenhuma geração falhou desde que esta página carregou.",
+  runningVersion: (version) => `Rodando a versão ${version} nesta página. O card da extensão pode estar mais novo até você recarregar.`,
   declined: (reason) => `Não continuei: ${reason}.`,
   skipped: (guard) => `Não continuei, trava: ${guard}.`,
   waiting: (seconds) => `Conexão caiu. Continuando em ${seconds}s...`,
@@ -274,6 +276,7 @@ function pickStrings() {
 // src/frontend.ts
 var SETTINGS_KEY = "config";
 var DECISIONS_KEY = "decisions";
+var STATUS_KEY = "status";
 var CONTINUE_COMMAND = "action-continue";
 var CLAIM_PREFIX = "spindle:lumi_autocontinue:claim:";
 var CLAIM_TTL_MS = 15000;
@@ -584,7 +587,7 @@ function setup(ctx) {
     const panel = buildSettingsPanel(ctx, tab.root, strings, () => config, (patch) => {
       config = normalizeConfig({ ...config, ...patch });
       settings.set(SETTINGS_KEY, config).catch(() => {});
-    }, () => decisions);
+    }, () => decisions, ctx.manifest?.version ?? "unknown");
     renderLog = panel.renderLog;
     renderLog();
     disposers.push(tab.onActivate(() => renderLog?.()));
@@ -595,7 +598,16 @@ function setup(ctx) {
   if (!ctx.host.surfaces) {
     console.warn("[lumi_autocontinue] this host exposes no command surfaces; the extension cannot continue anything");
   }
-  console.info("[lumi_autocontinue] watching for dropped connections");
+  const runningVersion = ctx.manifest?.version ?? "unknown";
+  console.info(`[lumi_autocontinue] ${runningVersion} watching for dropped connections`);
+  ctx.settings?.set(STATUS_KEY, {
+    version: runningVersion,
+    startedAt: Date.now(),
+    hasCommandSurfaces: !!ctx.host.surfaces,
+    document: DOCUMENT_TOKEN
+  }).catch((error) => {
+    console.warn("[lumi_autocontinue] could not persist the status beacon", error);
+  });
   return () => {
     destroyed = true;
     cancelPending();
@@ -607,7 +619,7 @@ function setup(ctx) {
     ctx.dom.cleanup();
   };
 }
-function buildSettingsPanel(ctx, root, strings, read, write, readDecisions) {
+function buildSettingsPanel(ctx, root, strings, read, write, readDecisions, runningVersion) {
   const panel = ctx.dom.createElement("div", { class: "lac-settings" });
   root.appendChild(panel);
   const row = (label, help) => {
@@ -681,9 +693,12 @@ function buildSettingsPanel(ctx, root, strings, read, write, readDecisions) {
   logTitle.textContent = strings.logTitle;
   const logHelp = ctx.dom.createElement("p", { class: "lac-help" });
   logHelp.textContent = strings.logHelp;
+  const logVersion = ctx.dom.createElement("p", { class: "lac-help" });
+  logVersion.textContent = strings.runningVersion(runningVersion);
   const logList = ctx.dom.createElement("ul", { class: "lac-log" });
   logBox.appendChild(logTitle);
   logBox.appendChild(logHelp);
+  logBox.appendChild(logVersion);
   logBox.appendChild(logList);
   panel.appendChild(logBox);
   const renderLog = () => {
